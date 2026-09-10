@@ -1,0 +1,39 @@
+# A 股单因子选股与回测研究系统基础配置
+# 尚未确认的研究假设使用 null，确认后再填写，不在初始化阶段擅自决定。
+
+project:
+  name: A-Share Single-Factor Stock Selection & Backtesting System
+  version: v1
+
+data:
+  source: CSMAR
+  raw_dir: data/raw
+  processed_dir: data/processed
+  start_date: null
+  end_date: null
+
+benchmark:
+  name: CSI 300
+  code: null
+
+factors:
+  momentum_lookback_months: 6
+  quantile_groups: 5
+  value_metric: PE
+  quality_metric: ROE
+
+portfolio:
+  rebalance_frequency: monthly
+  selection_quantile: 0.2
+  weighting: equal
+  execution: next_trading_day
+
+costs:
+  commission_rate: null
+  stamp_duty_rate: null
+  slippage_rate: null
+
+research:
+  annualization_days: 252
+  risk_free_rate: null
+
