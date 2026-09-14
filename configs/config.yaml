@@ -11,15 +11,17 @@ data:
   processed_dir: data/processed
   start_date: null
   end_date: null
+  strategy_return_field: Dretwd
+  momentum_price_field: Adjprcwd
 
 benchmark:
   name: CSI 300
-  code: null
+  code: H00300
 
 factors:
   momentum_lookback_months: 6
   quantile_groups: 5
-  value_metric: PE
+  value_metric: PE1TTM
   quality_metric: ROE
 
 portfolio:
@@ -36,4 +38,3 @@ costs:
 research:
   annualization_days: 252
   risk_free_rate: null
-
