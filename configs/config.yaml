@@ -36,6 +36,11 @@ portfolio:
   weighting: equal
   execution: next_trading_day
 
+universe:
+  markets: [1, 4, 16, 32]
+  min_listing_months: 6
+  normal_trading_status: "1"
+
 costs:
   commission_rate: null
   stamp_duty_rate: null
