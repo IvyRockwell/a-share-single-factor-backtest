@@ -26,6 +26,15 @@ def test_stage3_dispatches_to_stage3_runner(monkeypatch) -> None:
     assert calls == [[]]
 
 
+def test_stage4_dispatches_to_stage4_runner(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(run, "stage4_main", lambda argv: calls.append(argv))
+
+    run.main(["stage4"])
+
+    assert calls == [[]]
+
+
 def test_no_stage_only_shows_help(capsys, monkeypatch) -> None:
     monkeypatch.setattr(run, "stage2_main", lambda argv: (_ for _ in ()).throw(AssertionError("must not run")))
     monkeypatch.setattr(run, "stage3_main", lambda argv: (_ for _ in ()).throw(AssertionError("must not run")))

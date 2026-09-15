@@ -91,7 +91,7 @@ a-share-factor-project/
 
 ## 当前开发状态
 
-阶段 0～3 已完成：原始数据审计、标准化处理和按历史时点建立股票池均已有代码、测试和报告。阶段 4（PE、Momentum、ROE 因子计算）尚未开始，相关研究规则仍待后续确认。
+阶段 0～4 已完成：原始数据审计、标准化处理、按历史时点建立股票池，以及 PE、Momentum、ROE 因子计算均已有代码、测试和报告。阶段 4 的 PE 当日可用性仍是暂定假设，不能据此将 PE 结果表述为已严格消除前视偏差。
 
 ## 本地数据再生
 
@@ -100,6 +100,7 @@ CSMAR 原始数据与 `data/processed/` 下的标准数据、股票池和审计�
 ```bash
 python run.py stage2
 python run.py stage3
+python run.py stage4
 ```
 
 `run.py` 不带参数时只显示帮助，不会自动重跑任何阶段。
