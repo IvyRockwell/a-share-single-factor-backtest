@@ -247,10 +247,10 @@ def run(config: UniverseConfig) -> UniverseOutputs:
     return outputs
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Build the Stage 3 historical investment universe.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     outputs = run(load_universe_config(args.config))
     print(f"Built {len(outputs.pool):,} historical-universe records across {len(outputs.signal_dates)} signal dates.")
 

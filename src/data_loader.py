@@ -339,10 +339,10 @@ def run_pipeline(config: PipelineConfig) -> dict:
     return summary
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Build standardized Stage 2 CSMAR datasets.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     summary = run_pipeline(load_config(args.config))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
