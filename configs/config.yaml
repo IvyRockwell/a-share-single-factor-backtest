@@ -7,22 +7,28 @@ project:
 
 data:
   source: CSMAR
-  raw_dir: data/raw
+  raw_dir: 项目初始数据
   processed_dir: data/processed
-  start_date: null
-  end_date: null
+  start_date: 2014-09-12
+  end_date: 2025-12-31
   strategy_return_field: Dretwd
   momentum_price_field: Adjprcwd
+  strategy_return_unit: decimal
+  momentum_price_adjustment: cash_dividend_reinvestment
 
 benchmark:
   name: CSI 300
   code: H00300
+  close_field: Idxtrd05
+  return_field: Idxtrd08
+  return_unit: percent
 
 factors:
   momentum_lookback_months: 6
   quantile_groups: 5
   value_metric: PE1TTM
   quality_metric: ROE
+  pe_availability_assumption: trading_date
 
 portfolio:
   rebalance_frequency: monthly
