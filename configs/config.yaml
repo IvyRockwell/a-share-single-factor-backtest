@@ -30,6 +30,12 @@ factors:
   quality_metric: ROE
   pe_availability_assumption: trading_date
 
+factor_test:
+  future_return_start: next_trading_day
+  future_return_end: next_signal_date_close
+  min_ic_pairs: 50
+  retain_extreme_returns: true
+
 portfolio:
   rebalance_frequency: monthly
   selection_quantile: 0.2
