@@ -40,7 +40,9 @@ portfolio:
   rebalance_frequency: monthly
   selection_quantile: 0.2
   weighting: equal
-  execution: next_trading_day
+  selection_tie_policy: preserve_boundary_ties
+  execution: next_trading_day_open
+  execution_availability: normal_trading_status_and_valid_open_price
 
 universe:
   markets: [1, 4, 16, 32]
