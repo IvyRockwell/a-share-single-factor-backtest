@@ -50,9 +50,18 @@ universe:
   normal_trading_status: "1"
 
 costs:
-  commission_rate: null
-  stamp_duty_rate: null
-  slippage_rate: null
+  # 已确认的阶段 8 研究假设。所有比例均按单边实际成交金额计算。
+  commission_rate: 0.0003
+  commission_source: confirmed_research_assumption
+  minimum_commission: null
+  stamp_duty_rates:
+    - start_date: 2014-01-01
+      sell_rate: 0.001
+    - start_date: 2023-08-28
+      sell_rate: 0.0005
+  stamp_duty_source: https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/200809/t20080919_76432.htm; https://shanxi.chinatax.gov.cn/web/detail/sx-11400-545-1780448
+  slippage_scenarios_bp: [0, 10, 20]
+  slippage_source: confirmed_research_assumption
 
 research:
   annualization_days: 252
