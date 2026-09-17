@@ -12,13 +12,14 @@ from src.portfolio import main as stage6_main
 from src.backtest import main as stage7_main
 from src.costs import main as stage8_main
 from src.performance import main as stage9_main
+from src.robustness import main as stage10_main
 from src.universe import main as stage3_main
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Run one completed stage only when the caller explicitly selects it."""
     parser = argparse.ArgumentParser(description="Run a completed research stage.")
-    parser.add_argument("stage", nargs="?", choices=("stage2", "stage3", "stage4", "stage5", "stage6", "stage7", "stage8", "stage9"), help="stage to run")
+    parser.add_argument("stage", nargs="?", choices=("stage2", "stage3", "stage4", "stage5", "stage6", "stage7", "stage8", "stage9", "stage10"), help="stage to run")
     args = parser.parse_args(argv)
 
     if args.stage is None:
@@ -38,8 +39,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         stage7_main([])
     elif args.stage == "stage8":
         stage8_main([])
-    else:
+    elif args.stage == "stage9":
         stage9_main([])
+    else:
+        stage10_main([])
 
 
 if __name__ == "__main__":

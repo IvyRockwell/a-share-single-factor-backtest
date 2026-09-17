@@ -66,3 +66,8 @@ costs:
 research:
   annualization_days: 252
   risk_free_rate: 0.0
+
+robustness:
+  selection_quantiles: [0.1, 0.2, 0.3]
+  rebalance_frequencies: [monthly, quarterly]
+  quarterly_signal_months: [3, 6, 9, 12]
