@@ -65,4 +65,4 @@ costs:
 
 research:
   annualization_days: 252
-  risk_free_rate: null
+  risk_free_rate: 0.0
