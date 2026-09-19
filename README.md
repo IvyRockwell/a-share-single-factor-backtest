@@ -91,7 +91,7 @@ a-share-factor-project/
 
 ## 当前开发状态
 
-阶段 0～6 已完成：原始数据审计、标准化处理、按历史时点建立股票池、PE/Momentum/ROE 因子计算、因子有效性检验，以及三个单因子目标组合与执行审计均已有代码、测试和报告。阶段 4 的 PE 当日可用性仍是暂定假设，不能据此将 PE 结果表述为已严格消除前视偏差。
+阶段 0～12 已完成：数据审计与标准化、历史股票池、因子计算与检验、目标组合、历史回测、交易成本、风险收益评价、稳健性测试、研究图表和最终报告均已有对应产物。PE 当日可用性仍是研究假设，不能据此将 PE 结果表述为已严格消除前视偏差。
 
 ## 本地数据再生
 
@@ -103,6 +103,12 @@ python run.py stage3
 python run.py stage4
 python run.py stage5
 python run.py stage6
+python run.py stage7
+python run.py stage8
+python run.py stage9
+python run.py stage10
+python run.py stage11
+python -m pytest -q
 ```
 
-`run.py` 不带参数时只显示帮助，不会自动重跑任何阶段。
+`run.py` 不带参数时只显示帮助，不会自动重跑任何阶段。阶段 11 生成 `reports/figures/` 和图表索引；最终报告读取这些已固化结果，不重新选择参数或改变研究规则。
