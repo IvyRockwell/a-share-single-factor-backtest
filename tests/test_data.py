@@ -8,10 +8,12 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data_loader import (
+    ParquetAppender,
     PipelineConfig,
     clean_benchmark,
     clean_daily_trading,
     clean_valuation,
+    stream_large_table,
 )
 
 
@@ -63,3 +65,22 @@ def test_benchmark_converts_percent_return_to_decimal_and_marks_duplicates() -> 
     assert len(result) == 2
     assert result.loc[result.index[0], "total_return"] == 0.0125
     assert result["quality_flags"].str.contains("duplicate_key").all()
+
+
+def test_streaming_summary_reports_global_unique_stocks_not_chunk_sum(tmp_path: Path) -> None:
+    columns = ["Stkcd", "Trddt", "Opnprc", "Clsprc", "Dretwd", "Adjprcwd", "Markettype", "Trdsta"]
+    first = pd.DataFrame([["000001", "2014-09-12", 10, 10, 0, 10, 1, 1]], columns=columns)
+    second = pd.DataFrame([
+        ["000001", "2014-09-15", 10, 10, 0, 10, 1, 1],
+        ["000002", "2014-09-15", 10, 10, 0, 10, 1, 1],
+    ], columns=columns)
+    paths = [tmp_path / "one.csv", tmp_path / "two.csv"]
+    first.to_csv(paths[0], index=False)
+    second.to_csv(paths[1], index=False)
+    config = PipelineConfig(tmp_path, tmp_path / "processed", pd.Timestamp("2014-09-12"), pd.Timestamp("2025-12-31"))
+    config.processed_dir.mkdir()
+    issues = ParquetAppender(config.processed_dir / "issues.parquet")
+    summary = stream_large_table("daily_trading", paths, clean_daily_trading, config, issues)
+    issues.close()
+    assert summary["output_unique_stocks"] == 2
+    assert "output_unique_stocks_chunk_sum" not in summary

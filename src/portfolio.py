@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,18 +77,28 @@ def build_execution_dates(signal_dates: pd.Series, trading_dates: pd.Series) -> 
 def select_targets(factor_details: pd.DataFrame, config: PortfolioConfig) -> pd.DataFrame:
     """Select each factor's high-score names while preserving ties at the cutoff."""
     frames = []
-    cutoff = 1 - config.selection_quantile
     for factor in FACTORS:
         frame = factor_details[["signal_date", "stock_code", f"{factor}_score", f"{factor}_is_rankable"]].copy()
         frame = frame.rename(columns={f"{factor}_score": "factor_score", f"{factor}_is_rankable": "factor_is_rankable"})
         frame = frame.loc[frame["factor_is_rankable"].fillna(False)].copy()
         frame["factor"] = factor
         frame["selection_rank_pct"] = frame.groupby("signal_date")["factor_score"].rank(method="average", pct=True)
-        frame = frame.loc[frame["selection_rank_pct"].gt(cutoff)].copy()
+        frame["rankable_stock_count"] = frame.groupby("signal_date")["stock_code"].transform("size")
+        frame["nominal_selection_count"] = frame["rankable_stock_count"].map(
+            lambda count: math.ceil(count * config.selection_quantile)
+        )
+        frame["selection_cutoff_score"] = frame.groupby("signal_date")["factor_score"].transform(
+            lambda scores: scores.nlargest(math.ceil(len(scores) * config.selection_quantile)).iloc[-1]
+        )
+        frame = frame.loc[frame["factor_score"].ge(frame["selection_cutoff_score"])].copy()
         frame["target_stock_count"] = frame.groupby("signal_date")["stock_code"].transform("size")
         frame["target_weight"] = 1 / frame["target_stock_count"]
         frames.append(frame)
-    columns = ["factor", "signal_date", "stock_code", "factor_score", "selection_rank_pct", "target_stock_count", "target_weight"]
+    columns = [
+        "factor", "signal_date", "stock_code", "factor_score", "selection_rank_pct",
+        "rankable_stock_count", "nominal_selection_count", "selection_cutoff_score",
+        "target_stock_count", "target_weight",
+    ]
     return pd.concat(frames, ignore_index=True)[columns].sort_values(["factor", "signal_date", "stock_code"]).reset_index(drop=True)
 
 
@@ -112,7 +123,7 @@ def _split_execution_status(status: pd.Series) -> tuple[pd.Series, pd.Series]:
     reason = status.str.split(":", n=1).str[1]
     reason = reason.fillna(status.map({
         "executable": "normal_trading_status_and_valid_open_price",
-        "no_order": "target_continues_without_rebalance_order",
+        "rebalance_required": "target_continues_and_is_rebalanced_in_stage7",
         "execution_unavailable_due_to_data_end": "no_later_market_trading_date_in_data",
     }))
     return outcome, reason.astype("string")
@@ -138,7 +149,7 @@ def build_actions(targets: pd.DataFrame, execution_daily: pd.DataFrame, config: 
                 rows.append({"factor": factor, "signal_date": row.signal_date, "execution_date": row.execution_date, "stock_code": stock_code, "target_action": action, "target_weight": pd.NA})
             prior_by_factor[factor] = current
     actions = pd.DataFrame(rows).merge(trading, on=["stock_code", "execution_date"], how="left", validate="many_to_one")
-    actions["execution_status"] = "no_order"
+    actions["execution_status"] = "rebalance_required"
     for action in ("new_buy", "planned_sell"):
         mask = actions["target_action"].eq(action)
         actions.loc[mask, "execution_status"] = _execution_status(actions.loc[mask], config, action)
@@ -188,8 +199,10 @@ def validate_outputs(outputs: PortfolioOutputs, config: PortfolioConfig) -> None
     targets, actions, summary = outputs.targets, outputs.actions, outputs.period_summary
     if targets.duplicated(["factor", "signal_date", "stock_code"]).any():
         raise ValueError("Target holdings contain duplicate keys.")
-    if (~targets["selection_rank_pct"].gt(1 - config.selection_quantile)).any():
-        raise ValueError("A target falls at or below the confirmed selection boundary.")
+    if targets["factor_score"].lt(targets["selection_cutoff_score"]).any():
+        raise ValueError("A target falls below the score threshold at the nominal selection position.")
+    if targets["target_stock_count"].lt(targets["nominal_selection_count"]).any():
+        raise ValueError("Boundary-tie handling selected fewer stocks than the nominal ceiling count.")
     weight_sums = targets.groupby(["factor", "signal_date"])["target_weight"].sum()
     if not weight_sums.sub(1).abs().lt(1e-12).all():
         raise ValueError("Target weights do not sum to one.")
@@ -200,8 +213,8 @@ def validate_outputs(outputs: PortfolioOutputs, config: PortfolioConfig) -> None
         raise ValueError("Every target holding must retain an execution status and reason.")
     if actions.duplicated(["factor", "signal_date", "stock_code", "target_action"]).any():
         raise ValueError("Rebalance actions contain duplicate keys.")
-    if actions.loc[actions["target_action"].eq("continue_holding"), "execution_status"].ne("no_order").any():
-        raise ValueError("Continuing target holdings must not create an order.")
+    if actions.loc[actions["target_action"].eq("continue_holding"), "execution_status"].ne("rebalance_required").any():
+        raise ValueError("Continuing target holdings must be passed to Stage 7 for equal-weight rebalancing.")
     if summary.duplicated(["factor", "signal_date"]).any():
         raise ValueError("Portfolio summary contains duplicate period keys.")
 
@@ -215,7 +228,8 @@ def render_report(outputs: PortfolioOutputs, config: PortfolioConfig) -> str:
         f"- 每个因子独立在每个信号日从可排名股票中选择 Top {config.selection_quantile:.0%}；边界同分全部保留，不按股票代码拆分。",
         "- 目标持仓等权，目标权重在每个因子和信号日严格加总为 1。",
         "- 执行日为信号日后的首个市场交易日，执行价格口径为开盘；可执行需有该日交易记录、`trading_status=1` 且开盘价有效。",
-        "- 不可买入不替代、不延后买入，对应目标权重标记为现金；不可卖出标记为待卖出，实际恢复交易后的卖出留待阶段 7。",
+        "- 继续入选股票不视为无委托；阶段 7 在每个执行日按开盘前组合净值重新评估等权调整。",
+        "- 不可买入不替代、不跨日追单；完全退出但不可卖出的持仓留待阶段 7 逐日尝试。",
         "- 2025-12-31 的目标候选保留，但因数据末端没有后续执行日而不标记为已执行。", "", "## 输出核对", "",
         f"- 目标持仓：{len(outputs.targets):,} 条；调仓动作：{len(outputs.actions):,} 条；逐期汇总：{len(summary):,} 条。",
         f"- 各期目标权重均为 1；不可买入对应的目标现金权重总和为 {summary['unfilled_buy_cash_weight'].sum():.6f}。", "",

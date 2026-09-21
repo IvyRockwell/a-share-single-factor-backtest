@@ -17,7 +17,7 @@ from src.visualization import (
 )
 
 
-def test_q5_minus_q1_uses_the_verified_q1_copy_of_stage5_cumulative_field() -> None:
+def test_q5_minus_q1_accepts_identical_verified_copies() -> None:
     rows = []
     spreads = [0.10, -0.04]
     for date, spread, cumulative in zip(pd.to_datetime(["2020-01-31", "2020-02-28"]), spreads, [0.10, 0.06]):
@@ -25,20 +25,30 @@ def test_q5_minus_q1_uses_the_verified_q1_copy_of_stage5_cumulative_field() -> N
             rows.append({
                 "factor": "pe", "signal_date": date, "quantile": quantile,
                 "q_high_minus_q_low": spread,
-                "cumulative_q_high_minus_q_low": cumulative if quantile == 1 else cumulative + quantile,
+                "cumulative_q_high_minus_q_low": cumulative,
             })
     result = prepare_q_spread(pd.DataFrame(rows))
     assert result["cumulative_q_high_minus_q_low"].tolist() == pytest.approx([0.10, 0.06])
 
 
-def test_q5_minus_q1_rejects_a_q1_copy_that_breaks_the_fixed_stage5_rule() -> None:
+def test_q5_minus_q1_rejects_copies_that_differ_across_quantiles() -> None:
     frame = pd.DataFrame({
-        "factor": ["pe", "pe"], "signal_date": pd.to_datetime(["2020-01-31", "2020-02-28"]),
-        "quantile": [1, 1], "q_high_minus_q_low": [0.10, -0.04],
-        "cumulative_q_high_minus_q_low": [0.10, 0.07],
+        "factor": ["pe", "pe"], "signal_date": pd.to_datetime(["2020-01-31", "2020-01-31"]),
+        "quantile": [1, 2], "q_high_minus_q_low": [0.10, 0.10],
+        "cumulative_q_high_minus_q_low": [0.10, 0.11],
     })
-    with pytest.raises(ValueError, match="cumulative Q5-Q1"):
+    with pytest.raises(ValueError, match="copies differ"):
         prepare_q_spread(frame)
+
+
+def test_q5_minus_q1_rejects_an_incorrect_cumulative_rule() -> None:
+    rows = []
+    for date, spread, cumulative in zip(pd.to_datetime(["2020-01-31", "2020-02-28"]), [0.10, -0.04], [0.10, 0.07]):
+        for quantile in range(1, 6):
+            rows.append({"factor": "pe", "signal_date": date, "quantile": quantile,
+                         "q_high_minus_q_low": spread, "cumulative_q_high_minus_q_low": cumulative})
+    with pytest.raises(ValueError, match="cumulative Q5-Q1"):
+        prepare_q_spread(pd.DataFrame(rows))
 
 
 def test_figure_manifest_and_index_cover_every_requested_chart() -> None:

@@ -11,6 +11,7 @@ import pandas as pd
 import yaml
 
 FACTORS = ("pe", "momentum", "roe")
+RELATIVE_VALUE_TOLERANCE = 1e-12
 
 
 @dataclass(frozen=True)
@@ -38,21 +39,38 @@ def _valid_return(row: pd.Series | None) -> bool:
 
 
 def _can_trade(row: pd.Series | None, normal: str) -> bool:
-    return _valid_return(row) and str(row["trading_status"]) == normal and all(pd.notna(row[x]) and float(row[x]) > 0 for x in ("open_price", "close_price", "PreClosePrice")) and "invalid_open_price" not in str(row.get("quality_flags", ""))
+    return (
+        row is not None
+        and str(row["trading_status"]) == normal
+        and pd.notna(row["open_price"])
+        and float(row["open_price"]) > 0
+        and "invalid_open_price" not in str(row.get("quality_flags", ""))
+    )
 
 
 def _open_factor(row: pd.Series | None) -> float:
-    if not _valid_return(row) or float(row["open_price"]) <= 0 or float(row["close_price"]) <= 0:
+    if (
+        not _valid_return(row)
+        or pd.isna(row["open_price"])
+        or pd.isna(row["close_price"])
+        or float(row["open_price"]) <= 0
+        or float(row["close_price"]) <= 0
+    ):
         return 1.0
     return (1 + float(row["total_return"])) * float(row["open_price"]) / float(row["close_price"])
 
 
-def _entry_factor(row: pd.Series) -> float:
-    return (1 + float(row["total_return"])) * float(row["PreClosePrice"]) / float(row["open_price"])
+def _close_open_factor(row: pd.Series | None) -> float:
+    """Return the price-only open-to-close factor for an opening trade."""
+    if row is None or pd.isna(row["open_price"]) or pd.isna(row["close_price"]):
+        return 1.0
+    if float(row["open_price"]) <= 0 or float(row["close_price"]) <= 0:
+        return 1.0
+    return float(row["close_price"]) / float(row["open_price"])
 
 
 def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: pd.DataFrame, benchmark: pd.DataFrame, config: BacktestConfig) -> BacktestOutputs:
-    """Simulate Stage 6 orders with natural drift, cash, and pending sales."""
+    """Restore target equal weights at each open and retain only failed full exits."""
     executable_dates = targets.loc[targets["execution_date"].notna(), "execution_date"]
     if executable_dates.empty:
         raise ValueError("No execution dates are available.")
@@ -61,7 +79,8 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
     daily["PreClosePrice"] = pd.to_numeric(daily["PreClosePrice"], errors="coerce")
     daily = daily.sort_values(["trade_date", "stock_code"])
     actions = actions.loc[actions["execution_date"].notna()].copy()
-    by_action_day = {(f, d): x for (f, d), x in actions.groupby(["factor", "execution_date"], sort=False)}
+    targets = targets.loc[targets["execution_date"].notna()].copy()
+    by_target_day = {(f, d): x for (f, d), x in targets.groupby(["factor", "execution_date"], sort=False)}
     bench = benchmark.loc[benchmark["trade_date"].ge(start)].copy().set_index("trade_date")
     bench_nav = 1.0
     bench_values: dict[pd.Timestamp, tuple[float, float]] = {}
@@ -69,62 +88,151 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
         ret = float(row["total_return"]) if _valid_return(row) else 0.0
         bench_nav *= 1 + ret
         bench_values[day] = (ret, bench_nav)
-    states = {f: {"cash": 1.0, "positions": {}, "pending": set(), "prior_nav": 1.0} for f in FACTORS}
+    states = {f: {"cash": 1.0, "positions": {}, "pending": {}, "prior_nav": 1.0} for f in FACTORS}
     daily_rows, holding_rows, record_rows = [], [], []
+
+    def record(
+        factor: str, day: pd.Timestamp, signal_date: pd.Timestamp | pd.NaT, stock_code: str,
+        event_type: str, trade_reason: str, status: str, reason: str, target_weight: float,
+        pre_trade_open_value: float, target_open_value: float, requested_open_value: float,
+        executed_open_value: float, cash_scale: float,
+    ) -> None:
+        record_rows.append({
+            "factor": factor, "trade_date": day, "signal_date": signal_date,
+            "stock_code": stock_code, "event_type": event_type, "trade_reason": trade_reason,
+            "status": status, "reason": reason, "target_weight": target_weight,
+            "pre_trade_open_value": pre_trade_open_value, "target_open_value": target_open_value,
+            "requested_open_value": requested_open_value,
+            "executed_open_value": executed_open_value, "cash_scale": cash_scale,
+        })
+
     for day, group in daily.groupby("trade_date", sort=False):
         day_frame = group.set_index("stock_code", drop=False)
         bench_ret, bench_value = bench_values.get(day, (0.0, np.nan))
         for factor in FACTORS:
             state = states[factor]
             positions: dict[str, float] = state["positions"]
-            events = by_action_day.get((factor, day), pd.DataFrame())
-            signal = events["signal_date"].iloc[0] if not events.empty else pd.NaT
-            new_codes = set(events.loc[events["target_action"].eq("new_buy"), "stock_code"]) if not events.empty else set()
-            needed_codes = set(positions) | set(state["pending"]) | new_codes
+            target_frame = by_target_day.get((factor, day), pd.DataFrame())
+            signal = target_frame["signal_date"].iloc[0] if not target_frame.empty else pd.NaT
+            target_weights = (
+                target_frame.set_index("stock_code")["target_weight"].astype(float).to_dict()
+                if not target_frame.empty else {}
+            )
+            target_codes = set(target_weights)
+            pending_before = set(state["pending"])
+            if not target_frame.empty:
+                for code in target_codes:
+                    state["pending"].pop(code, None)
+                for code in set(positions) - target_codes:
+                    state["pending"].setdefault(code, signal)
+            needed_codes = set(positions) | set(state["pending"]) | target_codes
             rows = {code: day_frame.loc[code] for code in needed_codes if code in day_frame.index}
+            prior_close = positions.copy()
             opening = {code: value * _open_factor(rows.get(code)) for code, value in positions.items()}
-            state["pending"].difference_update(new_codes)
-            if not events.empty:
-                state["pending"].update(code for code in events.loc[events["target_action"].eq("planned_sell"), "stock_code"] if code in positions and code not in new_codes)
+            pre_trade_open = opening.copy()
+            traded_at_open: set[str] = set()
+
             for code in sorted(list(state["pending"])):
                 row = rows.get(code)
                 if _can_trade(row, config.normal_trading_status):
                     value = opening.get(code, positions[code])
                     state["cash"] += value
-                    positions.pop(code); opening.pop(code, None); state["pending"].remove(code)
-                    record_rows.append({"factor": factor, "trade_date": day, "signal_date": signal, "stock_code": code, "event_type": "sell", "status": "executed", "reason": "normal_trading_status_and_valid_open_price", "target_weight": np.nan, "desired_open_value": np.nan, "executed_open_value": value, "cash_scale": np.nan})
-                elif not events.empty:
-                    record_rows.append({"factor": factor, "trade_date": day, "signal_date": signal, "stock_code": code, "event_type": "sell", "status": "pending_sale", "reason": "missing_or_non_normal_trading_or_invalid_open", "target_weight": np.nan, "desired_open_value": np.nan, "executed_open_value": 0.0, "cash_scale": np.nan})
-            buy_events = events.loc[events["target_action"].eq("new_buy")] if not events.empty else pd.DataFrame()
-            opening_nav = state["cash"] + sum(opening.values())
-            candidates = []
-            for _, action in buy_events.iterrows():
-                code, desired, row = action["stock_code"], opening_nav * float(action["target_weight"]), rows.get(action["stock_code"])
-                if code in positions:
-                    record_rows.append({"factor": factor, "trade_date": day, "signal_date": signal, "stock_code": code, "event_type": "buy", "status": "no_order_already_held", "reason": "pending_sale_cancelled_by_new_target", "target_weight": action["target_weight"], "desired_open_value": desired, "executed_open_value": 0.0, "cash_scale": np.nan})
-                elif str(action["execution_status"]) == "executable" and _can_trade(row, config.normal_trading_status):
-                    candidates.append((action, desired, row))
-                else:
-                    record_rows.append({"factor": factor, "trade_date": day, "signal_date": signal, "stock_code": code, "event_type": "buy", "status": "unfilled_cash", "reason": str(action["execution_reason"]), "target_weight": action["target_weight"], "desired_open_value": desired, "executed_open_value": 0.0, "cash_scale": 0.0})
-            desired_sum = sum(x[1] for x in candidates)
-            scale = min(1.0, state["cash"] / desired_sum) if desired_sum else 0.0
-            bought = set()
-            for action, desired, row in candidates:
-                code, value = action["stock_code"], desired * scale
-                state["cash"] -= value
-                positions[code] = value * _entry_factor(row); bought.add(code)
-                record_rows.append({"factor": factor, "trade_date": day, "signal_date": signal, "stock_code": code, "event_type": "buy", "status": "executed" if scale == 1 else "partially_filled_cash_constrained", "reason": "normal_trading_status_and_valid_open_price" if scale == 1 else "cash_constrained_by_pending_or_existing_positions", "target_weight": action["target_weight"], "desired_open_value": desired, "executed_open_value": value, "cash_scale": scale})
-            frozen = 0
-            for code in list(positions):
-                if code not in bought:
+                    positions.pop(code, None)
+                    opening.pop(code, None)
+                    pending_signal = state["pending"].pop(code)
+                    trade_reason = "pending_exit_recovery" if code in pending_before else "complete_exit"
+                    record(factor, day, pending_signal, code, "sell", trade_reason, "executed",
+                           "normal_trading_status_and_valid_open_price", 0.0,
+                           pre_trade_open.get(code, value), 0.0, value, value, np.nan)
+                elif code not in pending_before:
+                    record(factor, day, state["pending"][code], code, "sell", "complete_exit", "pending_sale",
+                           "missing_or_non_normal_trading_or_invalid_open", 0.0,
+                           pre_trade_open.get(code, positions.get(code, 0.0)), 0.0,
+                           pre_trade_open.get(code, positions.get(code, 0.0)), 0.0, np.nan)
+
+            if not target_frame.empty:
+                opening_nav = state["cash"] + sum(opening.values())
+                value_tolerance = max(1.0, abs(opening_nav)) * RELATIVE_VALUE_TOLERANCE
+                buy_candidates: list[tuple[str, float, float, float, str]] = []
+                for code in sorted(target_codes):
+                    weight = target_weights[code]
+                    current = opening.get(code, 0.0)
+                    target_value = opening_nav * weight
+                    difference = target_value - current
+                    if abs(difference) <= value_tolerance:
+                        continue
                     row = rows.get(code)
-                    if _valid_return(row): positions[code] *= 1 + float(row["total_return"])
-                    else: frozen += 1
+                    if difference < 0:
+                        requested = -difference
+                        if _can_trade(row, config.normal_trading_status):
+                            opening[code] = current - requested
+                            state["cash"] += requested
+                            traded_at_open.add(code)
+                            record(factor, day, signal, code, "sell", "rebalance_reduce", "executed",
+                                   "normal_trading_status_and_valid_open_price", weight, current,
+                                   target_value, requested, requested, np.nan)
+                        else:
+                            record(factor, day, signal, code, "sell", "rebalance_reduce", "adjustment_not_executed",
+                                   "missing_or_non_normal_trading_or_invalid_open", weight, current,
+                                   target_value, requested, 0.0, np.nan)
+                    else:
+                        trade_reason = "rebalance_increase" if code in positions else "new_entry"
+                        if _can_trade(row, config.normal_trading_status):
+                            buy_candidates.append((code, difference, current, target_value, trade_reason))
+                        else:
+                            record(factor, day, signal, code, "buy", trade_reason, "unfilled_cash",
+                                   "missing_or_non_normal_trading_or_invalid_open", weight, current,
+                                   target_value, difference, 0.0, 0.0)
+
+                requested_sum = sum(item[1] for item in buy_candidates)
+                available_cash = max(0.0, state["cash"])
+                scale = min(1.0, available_cash / requested_sum) if requested_sum > value_tolerance else 0.0
+                for code, requested, current, target_value, trade_reason in buy_candidates:
+                    executed = requested * scale
+                    if executed > 0:
+                        state["cash"] -= executed
+                        opening[code] = current + executed
+                        positions.setdefault(code, 0.0)
+                        traded_at_open.add(code)
+                    status = "executed" if scale >= 1 - RELATIVE_VALUE_TOLERANCE else (
+                        "partially_filled_cash_constrained" if executed > 0 else "unfilled_cash"
+                    )
+                    reason = (
+                        "normal_trading_status_and_valid_open_price"
+                        if status == "executed" else "cash_constrained_by_pending_or_failed_reductions"
+                    )
+                    record(factor, day, signal, code, "buy", trade_reason, status, reason,
+                           target_weights[code], current, target_value, requested, executed, scale)
+
+            frozen = 0
+            close_positions: dict[str, float] = {}
+            valuation_status: dict[str, str] = {}
+            for code in list(positions):
+                row = rows.get(code)
+                if code in traded_at_open:
+                    factor_value = _close_open_factor(row)
+                    close_positions[code] = opening[code] * factor_value
+                    valid_close = row is not None and pd.notna(row["close_price"]) and float(row["close_price"]) > 0
+                    valuation_status[code] = "updated_with_close_open_price" if valid_close else "frozen_at_post_trade_open_value"
+                    if not valid_close:
+                        frozen += 1
+                elif _valid_return(row):
+                    close_positions[code] = prior_close[code] * (1 + float(row["total_return"]))
+                    valuation_status[code] = "updated_with_total_return"
+                else:
+                    close_positions[code] = prior_close[code]
+                    valuation_status[code] = "frozen_missing_or_invalid_return"
+                    frozen += 1
+            positions.clear()
+            positions.update(close_positions)
+            nav_scale = max(1.0, abs(state["prior_nav"]))
+            if abs(state["cash"]) <= nav_scale * RELATIVE_VALUE_TOLERANCE:
+                state["cash"] = 0.0
             equity, nav = sum(positions.values()), state["cash"] + sum(positions.values())
             daily_rows.append({"factor": factor, "trade_date": day, "gross_return": nav / state["prior_nav"] - 1, "nav": nav, "cash_value": state["cash"], "equity_value": equity, "held_stock_count": len(positions), "pending_sale_count": len(state["pending"]), "frozen_valuation_count": frozen, "benchmark_return": bench_ret, "benchmark_nav": bench_value})
             state["prior_nav"] = nav
             for code, value in positions.items():
-                holding_rows.append({"factor": factor, "trade_date": day, "stock_code": code, "close_value": value, "portfolio_weight": value / nav, "is_pending_sale": code in state["pending"], "valuation_status": "updated_with_total_return" if _valid_return(rows.get(code)) else "frozen_missing_or_invalid_return"})
+                holding_rows.append({"factor": factor, "trade_date": day, "stock_code": code, "close_value": value, "portfolio_weight": value / nav, "is_pending_sale": code in state["pending"], "valuation_status": valuation_status[code]})
     daily_output = pd.DataFrame(daily_rows)
     daily_output["month"] = daily_output["trade_date"].dt.to_period("M").astype(str)
     monthly = daily_output.groupby(["factor", "month"], as_index=False).agg(monthly_return=("gross_return", lambda x: (1 + x).prod() - 1), end_nav=("nav", "last"), benchmark_monthly_return=("benchmark_return", lambda x: (1 + x).prod() - 1), benchmark_end_nav=("benchmark_nav", "last"))
@@ -134,16 +242,30 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
 def validate_outputs(outputs: BacktestOutputs) -> None:
     if set(outputs.daily["factor"].unique()) != set(FACTORS) or outputs.daily.duplicated(["factor", "trade_date"]).any(): raise ValueError("Invalid daily series.")
     if outputs.daily[["nav", "cash_value", "equity_value"]].isna().any().any() or outputs.daily["nav"].le(0).any(): raise ValueError("Invalid NAV.")
+    if outputs.daily["cash_value"].lt(-1e-12).any(): raise ValueError("Backtest borrowed cash.")
     if outputs.monthly.duplicated(["factor", "month"]).any(): raise ValueError("Duplicate monthly rows.")
+    required = {
+        "factor", "trade_date", "signal_date", "stock_code", "event_type", "trade_reason",
+        "status", "reason", "target_weight", "pre_trade_open_value", "target_open_value",
+        "requested_open_value", "executed_open_value", "cash_scale",
+    }
+    if not required.issubset(outputs.rebalance_records.columns):
+        raise ValueError("Rebalance records are missing required audit fields.")
+    failed = ~outputs.rebalance_records["status"].isin({"executed", "partially_filled_cash_constrained"})
+    if outputs.rebalance_records.loc[failed, "executed_open_value"].ne(0).any():
+        raise ValueError("Failed or unfilled records must have zero executed value.")
+    exits = outputs.rebalance_records["trade_reason"].isin({"complete_exit", "pending_exit_recovery"})
+    if outputs.rebalance_records.loc[exits, ["target_weight", "target_open_value"]].ne(0).any().any():
+        raise ValueError("Complete exits must have zero target weight and target value.")
 
 
 def render_report(outputs: BacktestOutputs) -> str:
     daily, monthly, records = outputs.daily, outputs.monthly, outputs.rebalance_records
-    lines = ["# 阶段 7：历史回测", "", "## 固定规则", "", "- 初始净值为 1，现金收益为 0；不计交易成本、融资、整手约束、Sharpe 或稳健性测试。", "- 信号后首个市场交易日开盘执行；继续持仓自然漂移，不可买入留现金，待卖出仅在恢复正常交易且开盘价有效时卖出。", "- 买入首日收益为 `(1 + Dretwd) × PreClosePrice / open_price - 1`；整日持有使用 `Dretwd`。", "", "## 结果汇总", "", "| 因子 | 起始日 | 结束日 | 期末净值 | 累计毛收益 | 月度记录数 |", "| --- | --- | --- | ---: | ---: | ---: |"]
+    lines = ["# 阶段 7：历史回测", "", "## 固定规则", "", "- 初始净值为 1，现金收益为 0；不计交易成本、融资、整手约束、Sharpe 或稳健性测试。", "- 每个执行日按开盘前组合净值把当期目标组合恢复为等权：先完全退出和超配减仓，再新建和低配加仓。", "- 可执行买单在现金不足时同比例缩放；新建和继续持仓调权失败不跨日追单，只有完全退出失败进入待卖并逐日重试。", "- 开盘交易后的剩余或新增持仓按 `close_price / open_price - 1` 计当日价格收益；未在当日开盘交易的整日持仓使用 `Dretwd`。", "", "## 结果汇总", "", "| 因子 | 起始日 | 结束日 | 期末净值 | 累计毛收益 | 月度记录数 |", "| --- | --- | --- | ---: | ---: | ---: |"]
     for factor, item in daily.groupby("factor", sort=True): lines.append(f"| {factor} | {item.trade_date.min():%Y-%m-%d} | {item.trade_date.max():%Y-%m-%d} | {item.nav.iloc[-1]:.6f} | {item.nav.iloc[-1] - 1:.6f} | {len(monthly.loc[monthly.factor.eq(factor)])} |")
     last = daily.loc[daily.factor.eq("pe")].iloc[-1]
-    lines.extend(["", f"- H00300 同期净值：{last.benchmark_nav:.6f}；累计收益 {last.benchmark_nav - 1:.6f}。", f"- 冻结估值持仓日：{int(daily.frozen_valuation_count.sum()):,}；期末待卖出持仓：{int(daily.loc[daily.trade_date.eq(last.trade_date), 'pending_sale_count'].sum()):,}。", "", "## 固定抽样复核", "", "| 因子 | 日期 | 股票 | 事件 | 状态 | 目标开盘金额 | 实际开盘金额 |", "| --- | --- | --- | --- | --- | ---: | ---: |"])
-    for row in records.sample(n=min(8, len(records)), random_state=20260916).sort_values(["factor", "trade_date", "stock_code"]).itertuples(index=False): lines.append(f"| {row.factor} | {row.trade_date:%Y-%m-%d} | {row.stock_code} | {row.event_type} | {row.status} | {0 if pd.isna(row.desired_open_value) else row.desired_open_value:.6f} | {row.executed_open_value:.6f} |")
+    lines.extend(["", f"- H00300 同期净值：{last.benchmark_nav:.6f}；累计收益 {last.benchmark_nav - 1:.6f}。", f"- 冻结估值持仓日：{int(daily.frozen_valuation_count.sum()):,}；期末待卖出持仓：{int(daily.loc[daily.trade_date.eq(last.trade_date), 'pending_sale_count'].sum()):,}。", "", "## 固定抽样复核", "", "| 因子 | 日期 | 股票 | 调仓原因 | 状态 | 请求开盘金额 | 实际开盘金额 |", "| --- | --- | --- | --- | --- | ---: | ---: |"])
+    for row in records.sample(n=min(8, len(records)), random_state=20260916).sort_values(["factor", "trade_date", "stock_code"]).itertuples(index=False): lines.append(f"| {row.factor} | {row.trade_date:%Y-%m-%d} | {row.stock_code} | {row.trade_reason} | {row.status} | {row.requested_open_value:.6f} | {row.executed_open_value:.6f} |")
     lines.extend(["", "## 限制", "", "- 2025-12-31 没有后续执行日，未进入实际回测。", "- H00300 缺少可靠开盘价：基准在执行日使用完整 `Idxtrd08` 日收益，策略使用开盘至收盘收益，首日并非严格同一盘中起点。", "- 涨跌停无法可靠识别；正常状态和有效开盘价不构成成交保证。", "- 缺失或无效收益记录冻结最后可得估值；期末未恢复可交易的待卖出持仓不被虚构为已卖出。", ""])
     return "\n".join(lines)
 

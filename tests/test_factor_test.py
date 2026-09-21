@@ -72,6 +72,13 @@ def test_quantiles_keep_ties_together_and_q5_is_high_score() -> None:
     assert grouped["empty_group"].any()
 
 
+def test_repeated_q5_minus_q1_cumulative_value_is_identical_across_all_quantiles() -> None:
+    details = build_factor_test_details(_factor_details(), build_forward_returns(_factor_details(), _daily()), 5)
+    _, grouped = build_quantile_returns(details, 5)
+    copies = grouped.groupby(["factor", "signal_date"])["cumulative_q_high_minus_q_low"].nunique(dropna=False)
+    assert copies.eq(1).all()
+
+
 def test_rank_ic_requires_minimum_pairs_and_reports_positive_win() -> None:
     small = pd.DataFrame({"factor": ["pe"] * 3, "signal_date": pd.to_datetime(["2021-01-29"] * 3), "test_eligible": [True] * 3, "factor_score": [0.1, 0.2, 0.3], "forward_return": [0.1, 0.2, 0.3]})
     result = build_ic_series(small, 4).iloc[0]

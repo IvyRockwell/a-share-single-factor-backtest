@@ -11,9 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.portfolio import PortfolioConfig, build_portfolio_outputs, select_targets, validate_outputs
 
 
-def _config() -> PortfolioConfig:
+def _config(selection_quantile: float = 0.2) -> PortfolioConfig:
     return PortfolioConfig(
-        processed_dir=Path("data/processed"), selection_quantile=0.2, weighting="equal",
+        processed_dir=Path("data/processed"), selection_quantile=selection_quantile, weighting="equal",
         selection_tie_policy="preserve_boundary_ties", execution="next_trading_day_open",
         execution_availability="normal_trading_status_and_valid_open_price", normal_trading_status="1",
     )
@@ -55,6 +55,35 @@ def test_boundary_ties_are_kept_and_target_weights_are_equal() -> None:
     assert targets.groupby(["factor", "signal_date"])["target_weight"].sum().eq(1).all()
 
 
+@pytest.mark.parametrize("selection_quantile,expected_minimum", [(0.1, 1), (0.2, 2), (0.3, 3)])
+def test_threshold_selection_keeps_ties_crossing_each_boundary(selection_quantile: float, expected_minimum: int) -> None:
+    scores = [0.9, 0.9, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]
+    rows = []
+    for index, score in enumerate(scores):
+        row = {"signal_date": pd.Timestamp("2021-01-29"), "stock_code": f"{index:06d}"}
+        for factor in ("pe", "momentum", "roe"):
+            row[f"{factor}_score"] = score
+            row[f"{factor}_is_rankable"] = True
+        rows.append(row)
+    selected = select_targets(pd.DataFrame(rows), _config(selection_quantile))
+    pe = selected.loc[selected["factor"].eq("pe")]
+    assert len(pe) >= expected_minimum
+    assert set(pe.loc[pe["factor_score"].eq(0.9), "stock_code"]) == {"000000", "000001", "000002"}
+
+
+def test_all_equal_scores_and_small_sample_never_create_an_empty_target() -> None:
+    rows = []
+    for index in range(3):
+        row = {"signal_date": pd.Timestamp("2021-01-29"), "stock_code": f"{index:06d}"}
+        for factor in ("pe", "momentum", "roe"):
+            row[f"{factor}_score"] = 0.5
+            row[f"{factor}_is_rankable"] = True
+        rows.append(row)
+    selected = select_targets(pd.DataFrame(rows), _config(0.1))
+    assert selected.groupby("factor")["stock_code"].size().eq(3).all()
+    assert selected.groupby("factor")["target_weight"].sum().eq(1).all()
+
+
 def test_actions_audit_buy_sell_and_execution_failures_without_replacement() -> None:
     outputs = build_portfolio_outputs(_factor_details(), _daily(), _config())
     actions = outputs.actions
@@ -71,6 +100,7 @@ def test_actions_audit_buy_sell_and_execution_failures_without_replacement() -> 
     assert second.loc["000004", "execution_status"] == "executable"
     assert second.loc["000005", "execution_status"] == "pending_sale"
     assert second.loc["000005", "execution_reason"] == "missing_execution_day_trading_record"
+    assert actions.loc[actions["target_action"].eq("continue_holding"), "execution_status"].eq("rebalance_required").all()
     second_targets = outputs.targets.loc[
         outputs.targets["factor"].eq("pe") & outputs.targets["signal_date"].eq(pd.Timestamp("2021-02-26")), "stock_code"
     ]

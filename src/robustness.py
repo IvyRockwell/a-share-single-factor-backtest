@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -300,8 +301,9 @@ def _manual_review(
         summary = summaries.loc[summary_mask].sample(n=1, random_state=20260917 + index).iloc[0]
         raw = factor_details.loc[pd.to_datetime(factor_details["signal_date"]).eq(summary["signal_date"])]
         rankable = raw.loc[raw[f"{selected['factor']}_is_rankable"].fillna(False), f"{selected['factor']}_score"]
-        ranks = rankable.rank(method="average", pct=True)
-        independent_count = int(ranks.gt(1 - float(selected["selection_quantile"])).sum())
+        nominal_count = math.ceil(len(rankable) * float(selected["selection_quantile"]))
+        threshold = rankable.nlargest(nominal_count).iloc[-1]
+        independent_count = int(rankable.ge(threshold).sum())
         position = calendar.searchsorted(pd.Timestamp(summary["signal_date"]), side="right")
         expected_execution = calendar.iloc[position] if position < len(calendar) else pd.NaT
         row: dict[str, object] = {

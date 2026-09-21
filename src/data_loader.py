@@ -273,7 +273,8 @@ class ParquetAppender:
 def stream_large_table(name: str, paths: list[Path], cleaner, config: PipelineConfig, issues: ParquetAppender) -> dict:
     """Clean large daily shards in bounded memory and append their audit rows."""
     output = ParquetAppender(config.processed_dir / f"{name}.parquet")
-    records = stocks = outside = issue_rows = 0
+    records = outside = issue_rows = 0
+    unique_stocks: set[str] = set()
     flags: dict[str, int] = {}
     for path in paths:
         for raw_chunk in pd.read_csv(path, dtype="string", encoding="utf-8", chunksize=250_000):
@@ -282,7 +283,7 @@ def stream_large_table(name: str, paths: list[Path], cleaner, config: PipelineCo
             flagged = _issue_rows(name, cleaned)
             issues.append(flagged)
             records += len(cleaned)
-            stocks += cleaned["stock_code"].nunique()
+            unique_stocks.update(cleaned["stock_code"].dropna().astype(str).unique())
             outside += chunk_outside
             issue_rows += len(flagged)
             for flag, count in cleaned["quality_flags"].replace("", pd.NA).dropna().str.split("\\|").explode().value_counts().items():
@@ -290,7 +291,7 @@ def stream_large_table(name: str, paths: list[Path], cleaner, config: PipelineCo
     output.close()
     return {
         "output_records": records,
-        "output_unique_stocks_chunk_sum": stocks,
+        "output_unique_stocks": len(unique_stocks),
         "rows_with_quality_issue": issue_rows,
         "quality_flag_counts": flags,
         "excluded_as_outside_research_period": outside,

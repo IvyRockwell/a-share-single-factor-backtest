@@ -205,8 +205,12 @@ def build_quantile_returns(details: pd.DataFrame, quantile_groups: int) -> tuple
     output["cumulative_group_return"] = output.groupby(["factor", "quantile"])["equal_weight_forward_return"].transform(lambda values: (1 + values.fillna(0)).cumprod() - 1)
     wide = output.pivot(index=["factor", "signal_date"], columns="quantile", values="equal_weight_forward_return")
     spread = wide.get(quantile_groups).sub(wide.get(1)).rename("q_high_minus_q_low").reset_index()
+    spread = spread.sort_values(["factor", "signal_date"]).reset_index(drop=True)
+    spread["cumulative_q_high_minus_q_low"] = (
+        spread.groupby("factor")["q_high_minus_q_low"]
+        .transform(lambda values: values.fillna(0).cumsum())
+    )
     output = output.merge(spread, on=["factor", "signal_date"], how="left")
-    output["cumulative_q_high_minus_q_low"] = output.groupby("factor")["q_high_minus_q_low"].transform(lambda values: values.fillna(0).cumsum())
     return members, output.sort_values(["factor", "signal_date", "quantile"]).reset_index(drop=True)
 
 
