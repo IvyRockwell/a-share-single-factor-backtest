@@ -24,6 +24,8 @@
 | Momentum | -74.23% | -0.0236 | 39.53% | 129 |
 | ROE | -43.26% | 0.0065 | 48.89% | 135 |
 
+![PE 因子检验：五分位、Q5-Q1 与 Rank IC](reports/figures/02_factor_pe.png)
+
 ### 策略回测（毛收益，Top 20% 等权，月度调仓）
 
 | 序列 | 累计收益 | 年化收益 | 年化波动率 | 最大回撤 | Sharpe |
@@ -36,6 +38,10 @@
 PE 的三项证据方向一致，但受下面「已知限制」中 PE 可用时点假设的约束；Momentum 的预设方向未得到因子检验支持，且对交易成本敏感；ROE 取得正收益但横截面检验证据较弱。加入 20 bp 滑点后，三者净累计收益分别为 255.64%、-11.77%、105.49%。
 
 ![三因子毛净值与 H00300](reports/figures/05_gross_nav_vs_benchmark.png)
+
+三个毛收益策略都经历过较深回撤：PE -44.08%、Momentum -62.32%、ROE -53.71%，同期基准为 -46.06%。
+
+![三因子策略与 H00300 的历史回撤](reports/figures/07_drawdowns.png)
 
 ## 研究流程
 
@@ -160,9 +166,11 @@ python -m pytest -q
 │   ├── performance.py           # 阶段 9：收益与风险指标
 │   ├── robustness.py            # 阶段 10：稳健性网格
 │   └── visualization.py         # 阶段 11：图表
-├── tests/                       # 11 个测试模块，51 个用例
+├── .github/workflows/tests.yml   # CI：push / PR 自动运行全部测试
+├── tests/                       # 11 个测试模块 + conftest.py，51 个用例
 ├── run.py                       # 阶段入口
 ├── requirements.txt
+├── pyproject.toml               # pytest 与 ruff 配置
 ├── LICENSE
 └── README.md
 ```
@@ -177,6 +185,14 @@ python -m pytest -q
 | `reports/figures/*.png` | 17 张研究图表 | 是 |
 
 `data/processed/` 中的文件名即阶段编号（如 `backtest_stage8_daily_returns.parquet`），可从文件名直接追溯到生成它的阶段。
+
+## 稳健性测试
+
+固定检验 Top 10% / 20% / 30%、Monthly / Quarterly 与 0 / 10 / 20 bp 滑点，三个因子合计 54 个策略成本情景。PE 与 ROE 在已测试网格内没有出现累计净收益正负反转（PE 为 189.41%～278.48%，ROE 为 62.43%～137.11%）；Momentum 在 Top 10% / Monthly / 10 bp，以及 Top 10% 或 Top 20% / Monthly / 20 bp 三个情景下转为负收益，其余情景仍为正。测试只描述敏感性，不据此重新选择参数。
+
+![PE 稳健性测试](reports/figures/11_robustness_pe.png)
+
+全部 17 张图表见 [`reports/figures/`](reports/figures)，每张图的数据来源与口径见 [`reports/stage11_figure_index.md`](reports/stage11_figure_index.md)。
 
 ## 已知限制
 

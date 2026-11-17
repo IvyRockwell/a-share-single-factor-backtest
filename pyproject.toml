@@ -1,0 +1,18 @@
+# Tooling configuration.
+#
+# This project is a script-driven research pipeline rather than a distributable
+# package, so runtime dependencies live in requirements.txt and there is no
+# [project] table or build backend here.
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Import hygiene and pyflakes only. The statement-per-line rules (E7) are left
+# out because the pipeline deliberately keeps each stage's argparse wiring on a
+# few compact lines.
+select = ["E4", "E9", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

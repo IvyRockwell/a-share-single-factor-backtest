@@ -1,15 +1,11 @@
 """Tests for the confirmed Stage 4 factor rules."""
 
 from pathlib import Path
-import sys
 
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from src.factors import FactorConfig, build_factor_details, build_quality_summary, validate_outputs, FactorOutputs
-
+from src.factors import FactorConfig, FactorOutputs, build_factor_details, build_quality_summary, validate_outputs
 
 CONFIG = FactorConfig(Path("processed"), 6)
 

@@ -1,0 +1,9 @@
+# Normalize text files to LF in the repository, whatever the local OS.
+* text=auto eol=lf
+
+# Binary assets (never normalized, never diffed as text)
+*.png binary
+*.jpg binary
+*.pdf binary
+*.parquet binary
+*.xlsx binary

@@ -1,12 +1,9 @@
 """Tests for Stage 8 costs derived from actual Stage 7 fills."""
 
 from pathlib import Path
-import sys
 
 import pandas as pd
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.costs import CostConfig, build_cost_outputs, validate_outputs
 

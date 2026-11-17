@@ -1,12 +1,9 @@
 """Tests for the confirmed Stage 6 target-portfolio and execution-audit rules."""
 
 from pathlib import Path
-import sys
 
 import pandas as pd
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.portfolio import PortfolioConfig, build_portfolio_outputs, select_targets, validate_outputs
 

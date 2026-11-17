@@ -1,15 +1,11 @@
 """Regression tests for Stage 7 equal-weight execution and return rules."""
 
 from pathlib import Path
-import sys
 
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from src.backtest import BacktestConfig, build_backtest_outputs, validate_outputs
-
 
 FACTORS = ("pe", "momentum", "roe")
 CONFIG = BacktestConfig(Path("data/processed"), "1")

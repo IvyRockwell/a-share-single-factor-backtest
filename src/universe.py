@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import yaml
 
-
 STATUS_CONFLICTS = (
     ("600200", pd.Timestamp("2025-12-10"), pd.Timestamp("2025-12-29")),
     ("600701", pd.Timestamp("2021-03-15"), pd.Timestamp("2021-04-26")),

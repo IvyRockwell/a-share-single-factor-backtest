@@ -1,11 +1,8 @@
 """Tests for Stage 2 standardization rules."""
 
 from pathlib import Path
-import sys
 
 import pandas as pd
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data_loader import (
     ParquetAppender,
@@ -15,7 +12,6 @@ from src.data_loader import (
     clean_valuation,
     stream_large_table,
 )
-
 
 CONFIG = PipelineConfig(Path("raw"), Path("processed"), pd.Timestamp("2014-09-12"), pd.Timestamp("2025-12-31"))
 

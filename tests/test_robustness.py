@@ -1,12 +1,9 @@
 """Tests for the Stage 10 robustness grid and independent audit rules."""
 
 from pathlib import Path
-import sys
 
 import pandas as pd
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.performance import PerformanceOutputs
 from src.robustness import (
@@ -17,9 +14,11 @@ from src.robustness import (
     load_robustness_config,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_config_contains_the_complete_confirmed_parameter_grid() -> None:
-    config = load_robustness_config(Path("configs/config.yaml"))
+    config = load_robustness_config(ROOT / "configs" / "config.yaml")
     assert config.selection_quantiles == (0.1, 0.2, 0.3)
     assert config.rebalance_frequencies == ("monthly", "quarterly")
     assert config.quarterly_signal_months == (3, 6, 9, 12)

@@ -10,11 +10,10 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import yaml
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.patches import Patch
 from matplotlib.ticker import PercentFormatter
-import yaml
-
 
 FACTORS = ("pe", "momentum", "roe")
 FACTOR_LABELS = {"pe": "PE", "momentum": "Momentum", "roe": "ROE"}

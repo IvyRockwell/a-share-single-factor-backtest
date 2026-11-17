@@ -1,11 +1,8 @@
 """Tests for the confirmed Stage 3 point-in-time universe rules."""
 
 from pathlib import Path
-import sys
 
 import pandas as pd
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.universe import UniverseConfig, build_historical_universe
 

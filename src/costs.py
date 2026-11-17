@@ -9,7 +9,6 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-
 ACTUAL_STATUSES = {"executed", "partially_filled_cash_constrained"}
 
 

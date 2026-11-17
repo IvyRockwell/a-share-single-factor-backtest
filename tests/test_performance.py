@@ -1,16 +1,12 @@
 """Tests for Stage 9 risk-return metrics and source-lineage checks."""
 
 from pathlib import Path
-import sys
 
 import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from src.performance import PerformanceConfig, build_performance_outputs, validate_outputs
-
 
 FACTORS = ("pe", "momentum", "roe")
 DATES = pd.date_range("2021-01-04", periods=3, freq="B")

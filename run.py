@@ -5,16 +5,16 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
+from src.backtest import main as stage7_main
+from src.costs import main as stage8_main
 from src.data_loader import main as stage2_main
 from src.factor_test import main as stage5_main
 from src.factors import main as stage4_main
-from src.portfolio import main as stage6_main
-from src.backtest import main as stage7_main
-from src.costs import main as stage8_main
 from src.performance import main as stage9_main
+from src.portfolio import main as stage6_main
 from src.robustness import main as stage10_main
-from src.visualization import main as stage11_main
 from src.universe import main as stage3_main
+from src.visualization import main as stage11_main
 
 
 def main(argv: Sequence[str] | None = None) -> None:

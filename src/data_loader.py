@@ -18,7 +18,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
-
 RESEARCH_MARKETS = {"1", "4", "16", "32"}
 
 

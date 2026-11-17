@@ -11,7 +11,6 @@ import pandas as pd
 import pyarrow.parquet as pq
 import yaml
 
-
 FACTORS = ("pe", "momentum", "roe")
 
 

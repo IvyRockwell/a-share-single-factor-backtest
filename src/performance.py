@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import yaml
 
-
 FACTORS = ("pe", "momentum", "roe")
 SCENARIOS = (0, 10, 20)
 STAGE9_START = pd.Timestamp("2014-10-08")
