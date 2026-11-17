@@ -2,6 +2,8 @@
 
 **A-Share Single-Factor Stock Selection & Backtesting System**
 
+[![tests](https://github.com/IvyRockwell/a-share-single-factor-backtest/actions/workflows/tests.yml/badge.svg)](https://github.com/IvyRockwell/a-share-single-factor-backtest/actions/workflows/tests.yml)
+
 一个入门级量化研究项目：用 CSMAR A 股数据检验价值（PE）、动量（Momentum）、质量（ROE）三类基础因子的选股能力，并把单因子研究结果转化为可回测的月度调仓组合。项目强调可复核与可复现——每个阶段都有固定的研究规则、可审计的中间产物、独立复算的校验和对应的测试。
 
 **数据 → 因子 → 因子检验 → 选股 → 组合 → 回测 → 风险评价 → 研究报告**
