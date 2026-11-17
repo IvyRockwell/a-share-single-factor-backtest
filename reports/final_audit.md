@@ -52,7 +52,7 @@
 | Stage 11 | `python run.py stage11` | 20:18:54～20:19:02 | 退出码 0；17 张 PNG 与图表索引 |
 | 全量测试 | `python -m pytest -q` | 20:43:09～20:43:20 | `51 passed in 8.71s` |
 
-Stage 10 在本次成功运行前曾两次中断：第一次会话不再可访问，第二次按用户要求发送 Ctrl+C。两次都没有产生或覆盖新产物；成功运行前五个处理产物和报告均仍为 2026-09-17 旧版。
+Stage 10 在本次成功运行前曾两次中断，均未产生或覆盖任何产物；成功运行前五个处理产物和报告仍为 2026-09-17 旧版。
 
 ## 5）抽样人工复核
 
@@ -95,7 +95,7 @@ Stage 10 在本次成功运行前曾两次中断：第一次会话不再可访�
 - `notebooks/01_data_exploration.ipynb`：替换乱码内容并生成 40 份文件的实际执行输出。
 - `reports/data_audit_stage1.md`、`reports/data_cleaning_stage2.md`、`reports/factor_effectiveness_stage5.md`、`reports/portfolio_stage6.md`、`reports/backtest_stage7.md`、`reports/backtest_stage8.md`、`reports/performance_stage9.md`、`reports/robustness_stage10.md`：同步修复后规则、实际运行值和限制。
 - `reports/figures/*.png`、`reports/stage11_figure_index.md`：用新 Stage 5～10 产物重生并更新口径说明。
-- `reports/final_report.md`、`todo.md`、`reports/final_audit.md`：更新最终数字、验收状态和完整终审记录。
+- `reports/final_report.md`、`reports/final_audit.md`：更新最终数字和完整终审记录。
 
 ## 7）重跑后关键结果变化
 
