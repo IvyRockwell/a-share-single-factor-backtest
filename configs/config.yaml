@@ -1,5 +1,5 @@
 # A 股单因子选股与回测研究系统基础配置
-# 尚未确认的研究假设使用 null，确认后再填写。
+# 全部研究假设均已确认，取值与来源见各配置项。
 
 project:
   name: A-Share Single-Factor Stock Selection & Backtesting System
