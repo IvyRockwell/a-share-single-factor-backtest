@@ -107,12 +107,12 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-图表中文标签使用 `Microsoft YaHei` / `SimHei`。在 macOS 或 Linux 上重跑阶段 11 时，需要在 [`src/visualization.py`](src/visualization.py) 的 `font.sans-serif` 中加入系统已有的中文字体，否则中文会显示为方框。
+图表中文标签使用 `Microsoft YaHei` / `SimHei`。在 macOS 或 Linux 上重跑阶段 11 时，需要在 [`src/visualization.py`](src/visualization.py) 的 `font.sans-serif` 中加入系统已有的中文字体。
 
 ## 快速开始
 
 1. 把 CSMAR 导出的 CSV（保留 `[DES][csv].txt` 字段说明文件）按原目录结构放入 `项目初始数据/`。
-2. 依次运行各阶段。`run.py` 不带参数时只打印帮助，不会自动执行任何阶段：
+2. 依次运行各阶段。`run.py` 不带参数时只打印帮助：
 
 ```bash
 # 阶段 1：原始数据审计（Notebook）
@@ -139,7 +139,7 @@ python -m pytest -q
 
 测试使用构造数据，不依赖 `项目初始数据/` 或 `data/processed/`，可在干净环境中直接运行。
 
-阶段 2 读取全部原始 CSV，耗时较长；阶段 10 会跑 54 个参数组合，是耗时最长的一步。最终报告 [`reports/final_report.md`](reports/final_report.md) 读取阶段 4～11 已固化的产物，不重新选择参数或改变研究规则。
+最终报告 [`reports/final_report.md`](reports/final_report.md) 读取阶段 4～11 已固化的产物，不重新选择参数或改变研究规则。
 
 ## 项目结构
 
