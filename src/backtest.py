@@ -38,6 +38,44 @@ def _valid_return(row: pd.Series | None) -> bool:
     return row is not None and pd.notna(row["total_return"]) and "invalid_total_return" not in str(row.get("quality_flags", ""))
 
 
+def build_universe_lookups(pool: pd.DataFrame, market_cap: pd.DataFrame | None
+                           ) -> tuple[dict[pd.Timestamp, set[str]], dict[pd.Timestamp, pd.Series]]:
+    """Map each signal date to its member set and, when available, their market caps."""
+    members = {day: set(group["stock_code"]) for day, group in pool.groupby("signal_date")}
+    weights: dict[pd.Timestamp, pd.Series] = {}
+    if market_cap is not None:
+        usable = market_cap.loc[market_cap["has_market_cap"]]
+        weights = {day: group.set_index("stock_code")["market_cap"] for day, group in usable.groupby("signal_date")}
+    return members, weights
+
+
+def _universe_returns(group: pd.DataFrame, signal: pd.Timestamp,
+                      members: dict[pd.Timestamp, set[str]],
+                      weights: dict[pd.Timestamp, pd.Series]) -> tuple[float, float]:
+    """Equal- and cap-weighted return of the pool on one trading day."""
+    codes = members.get(signal)
+    if not codes:
+        return np.nan, np.nan
+    frame = group.loc[group["stock_code"].isin(codes) & _valid_return_mask(group)]
+    if frame.empty:
+        return np.nan, np.nan
+    equal = float(frame["total_return"].mean())
+    cap = weights.get(signal)
+    if cap is None:
+        return equal, np.nan
+    frame = frame.assign(weight=cap.reindex(frame["stock_code"]).to_numpy())
+    frame = frame.loc[frame["weight"].gt(0)]
+    if frame.empty:
+        return equal, np.nan
+    total = float(frame["weight"].sum())
+    return equal, float((frame["weight"] * frame["total_return"]).sum() / total)
+
+
+def _valid_return_mask(frame: pd.DataFrame) -> pd.Series:
+    return frame["total_return"].notna() & ~frame["quality_flags"].fillna("").astype("string").str.contains(
+        "invalid_total_return", regex=False)
+
+
 def _can_trade(row: pd.Series | None, normal: str) -> bool:
     return (
         row is not None
@@ -69,7 +107,10 @@ def _close_open_factor(row: pd.Series | None) -> float:
     return float(row["close_price"]) / float(row["open_price"])
 
 
-def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: pd.DataFrame, benchmark: pd.DataFrame, config: BacktestConfig) -> BacktestOutputs:
+def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: pd.DataFrame,
+                           benchmark: pd.DataFrame, config: BacktestConfig,
+                           pool: pd.DataFrame | None = None,
+                           market_cap: pd.DataFrame | None = None) -> BacktestOutputs:
     """Restore target equal weights at each open and retain only failed full exits."""
     executable_dates = targets.loc[targets["execution_date"].notna(), "execution_date"]
     if executable_dates.empty:
@@ -88,6 +129,17 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
         ret = float(row["total_return"]) if _valid_return(row) else 0.0
         bench_nav *= 1 + ret
         bench_values[day] = (ret, bench_nav)
+    members: dict[pd.Timestamp, set[str]] = {}
+    cap_weights: dict[pd.Timestamp, pd.Series] = {}
+    signal_for_day: dict[pd.Timestamp, pd.Timestamp] = {}
+    if pool is not None:
+        members, cap_weights = build_universe_lookups(pool, market_cap)
+        signal_dates = np.array(sorted(members))
+        day_values = np.array(sorted(daily["trade_date"].unique()))
+        positions = np.searchsorted(signal_dates, day_values, side="right") - 1
+        signal_for_day = {
+            day: signal_dates[position] for day, position in zip(day_values, positions) if position >= 0
+        }
     states = {f: {"cash": 1.0, "positions": {}, "pending": {}, "prior_nav": 1.0} for f in FACTORS}
     daily_rows, holding_rows, record_rows = [], [], []
 
@@ -109,6 +161,10 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
     for day, group in daily.groupby("trade_date", sort=False):
         day_frame = group.set_index("stock_code", drop=False)
         bench_ret, bench_value = bench_values.get(day, (0.0, np.nan))
+        signal = signal_for_day.get(day)
+        ew_ret, cw_ret = (
+            _universe_returns(group, signal, members, cap_weights) if signal is not None else (np.nan, np.nan)
+        )
         for factor in FACTORS:
             state = states[factor]
             positions: dict[str, float] = state["positions"]
@@ -229,13 +285,13 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
             if abs(state["cash"]) <= nav_scale * RELATIVE_VALUE_TOLERANCE:
                 state["cash"] = 0.0
             equity, nav = sum(positions.values()), state["cash"] + sum(positions.values())
-            daily_rows.append({"factor": factor, "trade_date": day, "gross_return": nav / state["prior_nav"] - 1, "nav": nav, "cash_value": state["cash"], "equity_value": equity, "held_stock_count": len(positions), "pending_sale_count": len(state["pending"]), "frozen_valuation_count": frozen, "benchmark_return": bench_ret, "benchmark_nav": bench_value})
+            daily_rows.append({"factor": factor, "trade_date": day, "gross_return": nav / state["prior_nav"] - 1, "nav": nav, "cash_value": state["cash"], "equity_value": equity, "held_stock_count": len(positions), "pending_sale_count": len(state["pending"]), "frozen_valuation_count": frozen, "benchmark_return": bench_ret, "benchmark_nav": bench_value, "ew_benchmark_return": ew_ret, "cw_benchmark_return": cw_ret})
             state["prior_nav"] = nav
             for code, value in positions.items():
                 holding_rows.append({"factor": factor, "trade_date": day, "stock_code": code, "close_value": value, "portfolio_weight": value / nav, "is_pending_sale": code in state["pending"], "valuation_status": valuation_status[code]})
     daily_output = pd.DataFrame(daily_rows)
     daily_output["month"] = daily_output["trade_date"].dt.to_period("M").astype(str)
-    monthly = daily_output.groupby(["factor", "month"], as_index=False).agg(monthly_return=("gross_return", lambda x: (1 + x).prod() - 1), end_nav=("nav", "last"), benchmark_monthly_return=("benchmark_return", lambda x: (1 + x).prod() - 1), benchmark_end_nav=("benchmark_nav", "last"))
+    monthly = daily_output.groupby(["factor", "month"], as_index=False).agg(monthly_return=("gross_return", lambda x: (1 + x).prod() - 1), end_nav=("nav", "last"), benchmark_monthly_return=("benchmark_return", lambda x: (1 + x).prod() - 1), benchmark_end_nav=("benchmark_nav", "last"), ew_benchmark_monthly_return=("ew_benchmark_return", lambda x: (1 + x.fillna(0)).prod() - 1), cw_benchmark_monthly_return=("cw_benchmark_return", lambda x: (1 + x.fillna(0)).prod() - 1))
     return BacktestOutputs(daily_output.drop(columns="month"), monthly, pd.DataFrame(holding_rows), pd.DataFrame(record_rows))
 
 
@@ -271,7 +327,9 @@ def render_report(outputs: BacktestOutputs) -> str:
 
 def run(config: BacktestConfig) -> BacktestOutputs:
     p = config.processed_dir
-    outputs = build_backtest_outputs(pd.read_parquet(p / "portfolio_targets.parquet"), pd.read_parquet(p / "portfolio_rebalance_actions.parquet"), pd.read_parquet(p / "daily_trading.parquet", columns=["stock_code", "trade_date", "open_price", "close_price", "total_return", "PreClosePrice", "trading_status", "quality_flags"]), pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"]), config)
+    pool = pd.read_parquet(p / "historical_universe.parquet", columns=["signal_date", "stock_code"])
+    market_cap = pd.read_parquet(p / "market_cap.parquet", columns=["signal_date", "stock_code", "market_cap", "has_market_cap"])
+    outputs = build_backtest_outputs(pd.read_parquet(p / "portfolio_targets.parquet"), pd.read_parquet(p / "portfolio_rebalance_actions.parquet"), pd.read_parquet(p / "daily_trading.parquet", columns=["stock_code", "trade_date", "open_price", "close_price", "total_return", "PreClosePrice", "trading_status", "quality_flags"]), pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"]), config, pool, market_cap)
     validate_outputs(outputs)
     outputs.daily.to_parquet(p / "backtest_daily_returns.parquet", index=False); outputs.monthly.to_csv(p / "backtest_monthly_returns.csv", index=False, encoding="utf-8-sig"); outputs.holdings.to_parquet(p / "backtest_holdings.parquet", index=False); outputs.rebalance_records.to_parquet(p / "backtest_rebalance_records.parquet", index=False)
     report_dir = p.parent.parent / "reports" / "generated"

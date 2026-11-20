@@ -174,3 +174,27 @@ def test_valid_open_with_missing_close_freezes_post_trade_open_value() -> None:
     assert day["cash_value"] >= 0
     assert holdings.set_index("stock_code").loc["A", "valuation_status"] == "frozen_at_post_trade_open_value"
     assert holdings["close_value"].notna().all()
+
+def test_universe_benchmarks_are_equal_and_cap_weighted() -> None:
+    from src.backtest import _universe_returns
+
+    group = pd.DataFrame({
+        "stock_code": ["A", "B", "C", "D"],
+        "total_return": [0.10, 0.20, -0.10, 0.50],
+        "quality_flags": ["", "", "", ""],
+    })
+    members = {pd.Timestamp("2021-01-29"): {"A", "B", "C"}}
+    weights = {pd.Timestamp("2021-01-29"): pd.Series({"A": 1.0, "B": 3.0, "C": 6.0})}
+
+    equal, capped = _universe_returns(group, pd.Timestamp("2021-01-29"), members, weights)
+
+    assert equal == pytest.approx((0.10 + 0.20 - 0.10) / 3)
+    assert capped == pytest.approx((1.0 * 0.10 + 3.0 * 0.20 + 6.0 * -0.10) / 10.0)
+
+
+def test_universe_benchmark_skips_an_empty_membership() -> None:
+    from src.backtest import _universe_returns
+
+    group = pd.DataFrame({"stock_code": ["A"], "total_return": [0.10], "quality_flags": [""]})
+    equal, capped = _universe_returns(group, pd.Timestamp("2021-01-29"), {}, {})
+    assert pd.isna(equal) and pd.isna(capped)

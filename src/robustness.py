@@ -356,6 +356,8 @@ def build_robustness_outputs(
     daily_trading: pd.DataFrame,
     benchmark: pd.DataFrame,
     config: RobustnessConfig,
+    pool: pd.DataFrame | None = None,
+    market_cap: pd.DataFrame | None = None,
 ) -> RobustnessOutputs:
     metric_frames: list[pd.DataFrame] = []
     daily_frames: list[pd.DataFrame] = []
@@ -373,7 +375,7 @@ def build_robustness_outputs(
             portfolio_config = _portfolio_config(config, quantile)
             portfolio = build_portfolio_outputs(details, daily_trading, portfolio_config)
             validate_portfolio(portfolio, portfolio_config)
-            backtest = build_backtest_outputs(portfolio.targets, portfolio.actions, daily_trading, benchmark, backtest_config)
+            backtest = build_backtest_outputs(portfolio.targets, portfolio.actions, daily_trading, benchmark, backtest_config, pool, market_cap)
             validate_backtest(backtest)
             cost_output = build_cost_outputs(backtest.daily, backtest.rebalance_records, cost_config)
             validate_costs(cost_output)
@@ -418,7 +420,9 @@ def run(config: RobustnessConfig) -> RobustnessOutputs:
         "PreClosePrice", "trading_status", "quality_flags",
     ])
     benchmark = pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"])
-    outputs = build_robustness_outputs(factor_details, daily, benchmark, config)
+    pool = pd.read_parquet(p / "historical_universe.parquet", columns=["signal_date", "stock_code"])
+    market_cap = pd.read_parquet(p / "market_cap.parquet", columns=["signal_date", "stock_code", "market_cap", "has_market_cap"])
+    outputs = build_robustness_outputs(factor_details, daily, benchmark, config, pool, market_cap)
     outputs.metrics.to_csv(p / "robustness_metrics.csv", index=False, encoding="utf-8-sig")
     outputs.daily.to_parquet(p / "robustness_daily_returns.parquet", index=False)
     outputs.costs.to_parquet(p / "robustness_costs.parquet", index=False)

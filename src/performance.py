@@ -12,6 +12,11 @@ import yaml
 
 FACTORS = ("pe", "momentum", "roe")
 SCENARIOS = (0, 10, 20)
+BENCHMARKS = (
+    ("h00300_benchmark", "H00300", "benchmark_return"),
+    ("ew_all_a_benchmark", "EW_ALL_A", "ew_benchmark_return"),
+    ("cw_all_a_benchmark", "CW_ALL_A", "cw_benchmark_return"),
+)
 
 
 @dataclass(frozen=True)
@@ -73,7 +78,8 @@ def validate_source_inputs(
     costs = costs.copy()
     _require_columns(
         gross_df,
-        {"factor", "trade_date", "gross_return", "nav", "benchmark_return", "benchmark_nav"},
+        {"factor", "trade_date", "gross_return", "nav", "benchmark_return", "benchmark_nav",
+         "ew_benchmark_return", "cw_benchmark_return"},
         "backtest daily results",
     )
     _require_columns(
@@ -254,13 +260,11 @@ def build_performance_outputs(
                 cumulative_transaction_cost=float(total["cumulative_transaction_cost"]),
             ))
 
-    benchmark_source = (
-        gross_df.loc[gross_df["factor"].eq(FACTORS[0]), ["trade_date", "benchmark_return"]]
-        .sort_values("trade_date")
-    )
-    benchmark = _series_frame(benchmark_source, "h00300_benchmark", "benchmark", "H00300", np.nan, "benchmark_return")
-    series_frames.append(benchmark)
-    metric_rows.append(_metric_row(benchmark, config))
+    for series_id, label, column in BENCHMARKS:
+        source = gross_df.loc[gross_df["factor"].eq(FACTORS[0]), ["trade_date", column]].sort_values("trade_date")
+        frame = _series_frame(source, series_id, "benchmark", label, np.nan, column)
+        series_frames.append(frame)
+        metric_rows.append(_metric_row(frame, config))
 
     drawdowns = pd.concat(series_frames, ignore_index=True)
     metrics = pd.DataFrame(metric_rows)
@@ -278,14 +282,17 @@ def build_performance_outputs(
 
 
 def validate_outputs(outputs: PerformanceOutputs) -> None:
-    if len(outputs.metrics) != 13 or outputs.metrics["series_id"].nunique() != 13:
-        raise ValueError("Performance evaluation must produce 13 distinct series.")
+    expected = len(FACTORS) * (1 + len(SCENARIOS)) + len(BENCHMARKS)
+    if len(outputs.metrics) != expected or outputs.metrics["series_id"].nunique() != expected:
+        raise ValueError(f"Performance evaluation must produce {expected} distinct series.")
     if outputs.drawdowns.duplicated(["series_id", "trade_date"]).any():
         raise ValueError("Drawdown output contains duplicate series/date rows.")
     if outputs.drawdowns.groupby("series_id")["trade_date"].size().nunique() != 1:
         raise ValueError("Performance series do not share one observation count.")
     benchmark = outputs.metrics.loc[outputs.metrics["series_type"].eq("benchmark")]
-    if len(benchmark) != 1 or benchmark[["cumulative_turnover", "annualized_turnover", "cumulative_transaction_cost"]].notna().any().any():
+    if len(benchmark) != len(BENCHMARKS):
+        raise ValueError("Every benchmark series must be present exactly once.")
+    if benchmark[["cumulative_turnover", "annualized_turnover", "cumulative_transaction_cost"]].notna().any().any():
         raise ValueError("Benchmark turnover and transaction costs must remain not applicable.")
     gross = outputs.metrics.loc[outputs.metrics["series_type"].eq("gross")]
     if gross["cumulative_transaction_cost"].notna().any():
@@ -322,7 +329,7 @@ def render_report(outputs: PerformanceOutputs, config: PerformanceConfig) -> str
     metrics = outputs.metrics.assign(_order=outputs.metrics["series_type"].map(order)).sort_values(["_order", "factor", "slippage_bp"], na_position="first")
     for row in metrics.itertuples(index=False):
         slip = "—" if pd.isna(row.slippage_bp) else f"{int(row.slippage_bp)} bp"
-        label = "H00300" if row.series_type == "benchmark" else str(row.factor)
+        label = str(row.factor)
         lines.append(
             f"| {label} | {row.series_type} | {slip} | {_format_value(row.cumulative_return)} | {_format_value(row.annualized_return)} | {_format_value(row.annualized_volatility)} | {_format_value(row.max_drawdown)} | {_format_value(row.sharpe_ratio)} | {_format_value(row.cumulative_turnover)} | {_format_value(row.annualized_turnover)} | {_format_value(row.cumulative_transaction_cost)} |"
         )

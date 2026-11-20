@@ -35,6 +35,8 @@ def _inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
                 "nav": nav,
                 "benchmark_return": benchmark_return,
                 "benchmark_nav": benchmark_value,
+                "ew_benchmark_return": benchmark_return,
+                "cw_benchmark_return": benchmark_return,
             })
         for scenario in (0, 10, 20):
             net_returns = gross_returns.copy()
@@ -83,7 +85,7 @@ def test_metrics_use_confirmed_daily_formulas_and_initial_nav_drawdown() -> None
 def test_outputs_keep_gross_net_and_benchmark_cost_meanings_separate() -> None:
     outputs = build_performance_outputs(*_inputs(), _config())
     validate_outputs(outputs)
-    assert len(outputs.metrics) == 13
+    assert len(outputs.metrics) == 15
     gross = outputs.metrics.loc[outputs.metrics["series_type"].eq("gross")]
     net = outputs.metrics.loc[outputs.metrics["series_type"].eq("net")]
     benchmark = outputs.metrics.loc[outputs.metrics["series_type"].eq("benchmark")]
@@ -91,7 +93,7 @@ def test_outputs_keep_gross_net_and_benchmark_cost_meanings_separate() -> None:
     assert gross["cumulative_transaction_cost"].isna().all()
     assert net["cumulative_transaction_cost"].gt(0).all()
     assert benchmark[["cumulative_turnover", "annualized_turnover", "cumulative_transaction_cost"]].isna().all().all()
-    assert len(outputs.monthly) == 13
+    assert len(outputs.monthly) == 15
 
 
 def test_mismatched_strategy_dates_are_rejected() -> None:
