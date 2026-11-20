@@ -28,7 +28,7 @@ factors:
   quantile_groups: 5
   value_metric: PE1TTM
   quality_metric: ROE
-  pe_availability_assumption: trading_date
+  pe_availability_assumption: disclosure_date
 
 factor_test:
   future_return_start: next_trading_day

@@ -69,20 +69,36 @@ def _reason_from_conditions(frame: pd.DataFrame, conditions: list[tuple[str, pd.
     return reason
 
 
-def add_pe_factor(pool: pd.DataFrame, valuation: pd.DataFrame) -> pd.DataFrame:
-    values = valuation[["stock_code", "trading_date", "pe_ttm", "quality_flags"]].copy()
+def add_pe_factor(pool: pd.DataFrame, valuation: pd.DataFrame, panel: pd.DataFrame,
+                  market_cap: pd.DataFrame | None) -> pd.DataFrame:
+    """Rank PE built from the reports that were public before each signal date.
+
+    The vendor ``pe_ttm`` column is kept for comparison only; it prices the latest
+    quarter end rather than the latest disclosure and therefore looks ahead.
+    """
+    values = valuation[["stock_code", "trading_date", "pe_ttm"]].copy()
     if values.duplicated(["stock_code", "trading_date"]).any():
         raise ValueError("Valuation data contains duplicate (stock_code, trading_date) keys.")
-    values = values.rename(columns={"trading_date": "signal_date", "quality_flags": "pe_quality_flags"})
+    values = values.rename(columns={"trading_date": "signal_date"})
     result = pool.merge(values, on=["signal_date", "stock_code"], how="left", validate="one_to_one")
-    invalid = result["pe_quality_flags"].fillna("").str.contains("invalid_pe_ttm")
-    result["pe_is_rankable"] = result["pe_ttm"].gt(0) & ~invalid
+    if market_cap is None:
+        result["market_cap"] = np.nan
+    else:
+        result = result.merge(
+            market_cap[["signal_date", "stock_code", "market_cap"]],
+            on=["signal_date", "stock_code"], how="left", validate="one_to_one",
+        )
+    result = attach_pit_pe(result, panel)
+    has_report = result["pe_pit_disclosure_date"].notna()
+    positive_ttm = result["pe_pit_ttm_net_profit"].gt(0)
+    result["pe_is_rankable"] = result["pe_pit"].gt(0)
     result["pe_unrankable_reason"] = _reason_from_conditions(result, [
-        ("missing_or_invalid_pe_ttm", result["pe_ttm"].isna() | invalid),
-        ("nonpositive_pe_ttm", result["pe_ttm"].le(0)),
+        ("no_disclosed_report", ~has_report),
+        ("nonpositive_or_missing_ttm", has_report & ~positive_ttm),
+        ("missing_market_cap", has_report & positive_ttm & ~result["market_cap"].gt(0)),
     ])
-    _rank_factor(result, "pe_ttm", "pe_is_rankable", "pe_score", "pe_rank", higher_is_better=False)
-    return result.drop(columns=["pe_quality_flags"])
+    _rank_factor(result, "pe_pit", "pe_is_rankable", "pe_score", "pe_rank", higher_is_better=False)
+    return result.drop(columns=["market_cap"])
 
 
 def add_momentum_factor(pool: pd.DataFrame, daily: pd.DataFrame, lookback_months: int) -> pd.DataFrame:
@@ -268,7 +284,9 @@ def build_factor_details(pool: pd.DataFrame, valuation: pd.DataFrame, daily: pd.
         market_cap = market_cap.assign(signal_date=pd.to_datetime(market_cap["signal_date"]).astype("datetime64[ns]"))
     if industry is not None:
         industry = industry.assign(effective_date=pd.to_datetime(industry["effective_date"]).astype("datetime64[ns]"))
-    result = add_pe_factor(pool[["signal_date", "stock_code"]].copy(), valuation)
+    ttm = build_ttm_net_profit(financials)
+    panel = build_pit_panel(pool[["signal_date", "stock_code"]], ttm)
+    result = add_pe_factor(pool[["signal_date", "stock_code"]].copy(), valuation, panel, market_cap)
     result = add_momentum_factor(result, daily, config.momentum_lookback_months)
     result = add_roe_factor(result, financials)
     if market_cap is not None:
@@ -282,7 +300,7 @@ def build_factor_details(pool: pd.DataFrame, valuation: pd.DataFrame, daily: pd.
 
 
 FACTOR_COLUMNS = {
-    "pe": ("pe_ttm", "pe_is_rankable", "pe_unrankable_reason"),
+    "pe": ("pe_pit", "pe_is_rankable", "pe_unrankable_reason"),
     "momentum": ("momentum_6m_return", "momentum_is_rankable", "momentum_unrankable_reason"),
     "roe": ("roe", "roe_is_rankable", "roe_unrankable_reason"),
 }
@@ -302,7 +320,7 @@ def build_quality_summary(details: pd.DataFrame) -> pd.DataFrame:
                 "raw_max": valid.max() if not valid.empty else pd.NA,
             }
             if factor == "pe":
-                positive = period.loc[period["pe_ttm"].gt(0), "pe_ttm"]
+                positive = period.loc[period[raw].gt(0), raw]
                 row["positive_pe_p99"] = positive.quantile(0.99) if not positive.empty else pd.NA
                 row["positive_pe_max"] = positive.max() if not positive.empty else pd.NA
             else:
@@ -343,12 +361,12 @@ def render_report(outputs: FactorOutputs) -> str:
     lines = [
         "# PE / Momentum / ROE 因子", "", "## 已执行规则", "",
         "- 仅在月末历史股票池内计算；每个因子分别保留有效样本及不可排名原因。",
-        "- PE 使用信号日 `pe_ttm` 的正值，低 PE 得到更高分数。",
+        "- PE 使用按实际披露日重建的 TTM 净利润（`pe_pit`）：只取信号日前严格已披露的最新报告，年报直接取净利润，季报用「本期 + 上年年报 − 上年同期」拼出 TTM；净利润与市值均为正时参与排名，低 PE 得到更高分数。",
         "- Momentum 使用信号日与不晚于六个自然月前目标日的最近有效 `adjusted_close`，高收益得到更高分数。",
         "- ROE 使用信号日前严格已披露的最新合并年度报告（同披露日取最新报告期），高 ROE 得到更高分数。",
         "- 分数为当期有效样本内的反向名次比例，最高看好为 `1.0`；同值采用平均名次。", "",
         "## 重要限制", "",
-        "- 本项目按既定规则将交易日 `PE1TTM` 视作当日可用；原始数据无法复核财报期、披露时点、报表版本和历史股本生效时间。因此 PE 结果不能表述为已严格消除前视偏差。", "",
+        "- 供应商 `PE1TTM` 实测按最近一个季度末而非最近一份已披露报告计算，在披露窗口内含有前视信息；本因子已改用 `pe_pit`，逐月对照写入 `data/processed/pe_pit_check.csv`。`pe_ttm` 列仅保留作对照，不参与排名。", "",
         "## 按期质量统计", "", "| 因子 | 信号日数 | 平均股票池 | 平均有效样本 | 平均不可排名 |", "| --- | ---: | ---: | ---: | ---: |",
     ]
     for factor, group in quality.groupby("factor", sort=False):
@@ -365,10 +383,123 @@ def render_report(outputs: FactorOutputs) -> str:
     return "\n".join(lines)
 
 
+PIT_PE_MIN_OVERLAP = 0.90
+
+
+def build_ttm_net_profit(financials: pd.DataFrame) -> pd.DataFrame:
+    """Rebuild trailing-twelve-month profit from disclosure-timed reports."""
+    reports = financials.loc[
+        financials["Typrep"].eq("A")
+        & financials["net_profit"].notna()
+        & financials["actual_disclosure_date"].notna()
+        & ~financials["invalid_actual_disclosure_date"].fillna(False),
+        ["stock_code", "report_date", "actual_disclosure_date", "net_profit"],
+    ].copy()
+    reports["report_date"] = pd.to_datetime(reports["report_date"]).astype("datetime64[ns]")
+    reports["actual_disclosure_date"] = pd.to_datetime(reports["actual_disclosure_date"]).astype("datetime64[ns]")
+    reports = reports.sort_values("actual_disclosure_date").drop_duplicates(
+        ["stock_code", "report_date"], keep="last"
+    )
+    reports["year"] = reports["report_date"].dt.year
+    reports["month"] = reports["report_date"].dt.month
+
+    annual = reports.loc[reports["month"].eq(12), ["stock_code", "year", "net_profit"]]
+    prior_annual = annual.assign(year=annual["year"] + 1).rename(columns={"net_profit": "prior_annual_net_profit"})
+    prior_same = (
+        reports[["stock_code", "year", "month", "net_profit"]]
+        .assign(year=lambda item: item["year"] + 1)
+        .rename(columns={"net_profit": "prior_same_net_profit"})
+    )
+    frame = reports.merge(prior_same, on=["stock_code", "year", "month"], how="left")
+    frame = frame.merge(prior_annual, on=["stock_code", "year"], how="left")
+    quarterly = frame["month"].ne(12)
+    frame["ttm_net_profit"] = np.where(
+        quarterly,
+        frame["net_profit"] + frame["prior_annual_net_profit"] - frame["prior_same_net_profit"],
+        frame["net_profit"],
+    )
+    frame.loc[quarterly & (frame["prior_annual_net_profit"].isna() | frame["prior_same_net_profit"].isna()),
+              "ttm_net_profit"] = np.nan
+    return frame[["stock_code", "report_date", "actual_disclosure_date", "ttm_net_profit"]].sort_values(
+        ["actual_disclosure_date", "stock_code"]).reset_index(drop=True)
+
+
+def build_pit_panel(pool: pd.DataFrame, ttm: pd.DataFrame) -> pd.DataFrame:
+    """Attach the latest report period disclosed strictly before each signal date."""
+    reports = ttm.sort_values(["stock_code", "report_date", "actual_disclosure_date"])
+    frames = []
+    for day in pd.Series(pd.to_datetime(pool["signal_date"]).unique()).sort_values():
+        visible = reports.loc[reports["actual_disclosure_date"] < day]
+        if visible.empty:
+            continue
+        latest = visible.drop_duplicates("stock_code", keep="last").assign(signal_date=day)
+        frames.append(latest)
+    if not frames:
+        return pd.DataFrame(columns=["signal_date", "stock_code", "report_date", "actual_disclosure_date",
+                                     "ttm_net_profit"])
+    panel = pd.concat(frames, ignore_index=True)
+    return panel.rename(columns={"report_date": "pe_pit_report_period",
+                                 "actual_disclosure_date": "pe_pit_disclosure_date"})
+
+
+def attach_pit_pe(details: pd.DataFrame, panel: pd.DataFrame) -> pd.DataFrame:
+    """Add the disclosure-timed PE and the inputs it was built from."""
+    columns = ["signal_date", "stock_code", "ttm_net_profit", "pe_pit_report_period", "pe_pit_disclosure_date"]
+    merged = details.merge(panel[columns], on=["signal_date", "stock_code"], how="left", validate="one_to_one")
+    merged["pe_pit_ttm_net_profit"] = merged["ttm_net_profit"]
+    positive = merged["pe_pit_ttm_net_profit"].gt(0) & merged["market_cap"].gt(0)
+    merged["pe_pit"] = np.where(positive, merged["market_cap"] / merged["pe_pit_ttm_net_profit"], np.nan)
+    return merged.drop(columns=["ttm_net_profit"])
+
+
+def build_pe_pit_check(details: pd.DataFrame, valuation: pd.DataFrame) -> pd.DataFrame:
+    """Compare the rebuilt PE with the vendor field on every signal date."""
+    vendor = valuation[["stock_code", "trading_date", "pe_ttm"]].rename(columns={"trading_date": "signal_date"})
+    vendor["signal_date"] = pd.to_datetime(vendor["signal_date"]).astype("datetime64[ns]")
+    frame = details[["signal_date", "stock_code", "pe_pit"]].merge(
+        vendor, on=["signal_date", "stock_code"], how="left", validate="one_to_one"
+    )
+    frame["pit_ok"] = frame["pe_pit"].gt(0)
+    frame["vendor_ok"] = frame["pe_ttm"].gt(0)
+    frame["relative_difference"] = np.where(
+        frame["pit_ok"] & frame["vendor_ok"],
+        (frame["pe_pit"] - frame["pe_ttm"]).abs() / frame["pe_ttm"],
+        np.nan,
+    )
+    rows = []
+    for signal_date, group in frame.groupby("signal_date", sort=True):
+        both = group["pit_ok"] & group["vendor_ok"]
+        differences = group.loc[both, "relative_difference"]
+        rows.append({
+            "signal_date": signal_date,
+            "pool_count": len(group),
+            "pit_count": int(group["pit_ok"].sum()),
+            "csmar_count": int(group["vendor_ok"].sum()),
+            "overlap": int(both.sum()),
+            "pit_only": int((group["pit_ok"] & ~group["vendor_ok"]).sum()),
+            "csmar_only": int((~group["pit_ok"] & group["vendor_ok"]).sum()),
+            "share_within_1pct": float(differences.lt(0.01).mean()) if both.any() else np.nan,
+            "median_relative_difference": float(differences.median()) if both.any() else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def validate_pit_check(check: pd.DataFrame) -> None:
+    """Fail when the rebuilt PE cannot cover the vendor field.
+
+    The two series are *expected* to differ: the rebuild only uses reports that were
+    public on the signal date, which is the whole point of it. What must hold is that
+    the rebuild reaches (almost) every name the vendor can price.
+    """
+    coverage = check["overlap"].sum() / max(check["csmar_count"].sum(), 1)
+    if coverage < PIT_PE_MIN_OVERLAP:
+        raise ValueError(f"Only {coverage:.1%} of the vendor PE can be rebuilt.")
+
+
 def run(config: FactorConfig) -> FactorOutputs:
     directory = config.processed_dir
     pool = pd.read_parquet(directory / "historical_universe.parquet", columns=["signal_date", "stock_code"])
-    valuation = pd.read_parquet(directory / "valuation.parquet", columns=["stock_code", "trading_date", "pe_ttm", "quality_flags"])
+    valuation = pd.read_parquet(directory / "valuation.parquet", columns=["stock_code", "trading_date", "pe_ttm"])
     earliest_target = pool["signal_date"].min() - pd.DateOffset(months=config.momentum_lookback_months)
     daily = pd.read_parquet(
         directory / "daily_trading.parquet", columns=["stock_code", "trade_date", "adjusted_close", "quality_flags"],
@@ -380,6 +511,12 @@ def run(config: FactorConfig) -> FactorOutputs:
     industry_path = directory / "industry.parquet"
     industry = pd.read_parquet(industry_path, columns=["stock_code", "industry_standard", "effective_date", "industry_code"]) if industry_path.exists() else None
     details = build_factor_details(pool, valuation, daily, financials, config, market_cap, industry)
+    if market_cap is not None:
+        check = build_pe_pit_check(details, valuation)
+        validate_pit_check(check)
+        check.to_csv(directory / "pe_pit_check.csv", index=False, encoding="utf-8-sig")
+        print(f"PIT PE check: median relative difference {check['median_relative_difference'].median():.2e}, "
+              f"{check['share_within_1pct'].mean():.1%} of rows agree within 1%.")
     quality = build_quality_summary(details)
     outputs = FactorOutputs(details, quality)
     validate_outputs(outputs, pool)

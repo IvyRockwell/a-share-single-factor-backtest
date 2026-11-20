@@ -427,7 +427,7 @@ def render_report(outputs: FactorTestOutputs) -> str:
             )
     lines.extend(["", "## 口径限制", "", "- 2025-12-31 没有后续持有期数据，未进入分组收益或 IC。",
                   "- Momentum 在 2014-09 至 2015-02 没有可用六个月历史价格，未进行分组或 IC。",
-                  "- PE 按交易日 `PE1TTM` 可用的既定口径处理；该限制仅在最终报告中说明。", ""])
+                  "- PE 按信号日前已实际披露财报重建的 TTM 净利润计算，不使用供应商 `PE1TTM`；逐月对照见 `pe_pit_check.csv`。", ""])
     return "\n".join(lines)
 
 
