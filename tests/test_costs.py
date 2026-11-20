@@ -42,6 +42,26 @@ def test_costs_use_only_actual_fills_and_apply_each_cost_direction() -> None:
     assert not outputs.costs.trade_date.eq(pd.Timestamp("2023-08-29")).any()
 
 
+def test_minimum_commission_binds_for_a_small_order() -> None:
+    config = CostConfig(
+        Path("data/processed"), 0.0003,
+        ((pd.Timestamp("2014-01-01"), 0.001), (pd.Timestamp("2023-08-28"), 0.0005)),
+        (0, 10, 20), minimum_commission=5.0, initial_capital=1_000_000.0,
+    )
+    records = _records().iloc[[0]].copy()
+    records["executed_open_value"] = 0.001
+    outputs = build_cost_outputs(_daily(), records, config)
+    first = outputs.costs.iloc[0]
+    assert first["commission"] == pytest.approx(5.0 / 1_000_000.0)
+
+
+def test_breakeven_slippage_is_reported_per_factor() -> None:
+    outputs = build_cost_outputs(_daily(), _records(), _config())
+    assert set(outputs.breakeven["factor"]) == {"pe"}
+    assert outputs.breakeven.iloc[0]["cumulative_trade_amount"] > 0
+    assert pd.notna(outputs.breakeven.iloc[0]["breakeven_slippage_bp"])
+
+
 def test_historical_stamp_duty_change_and_net_results_are_below_gross() -> None:
     outputs = build_cost_outputs(_daily(), _records(), _config())
     post_change = outputs.costs.loc[(outputs.costs.trade_date.eq(pd.Timestamp("2023-08-28"))) & outputs.costs.slippage_bp.eq(0)].iloc[0]

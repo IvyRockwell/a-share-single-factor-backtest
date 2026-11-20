@@ -44,6 +44,11 @@ class RobustnessConfig:
     slippage_scenarios_bp: tuple[int, ...]
     annualization_days: int
     risk_free_rate: float
+    initial_capital: float = 100_000_000.0
+    adv_window: int = 20
+    adv_fraction: float | None = None
+    min_adv_periods: int = 10
+    minimum_commission: float | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,8 @@ def load_robustness_config(config_path: Path) -> RobustnessConfig:
     portfolio = settings["portfolio"]
     costs = settings["costs"]
     research = settings["research"]
+    capacity = settings.get("capacity") or {}
+    adv_fraction = capacity.get("adv_fraction")
     config = RobustnessConfig(
         processed_dir=config_path.parent.parent / settings["data"]["processed_dir"],
         selection_quantiles=tuple(float(value) for value in robust["selection_quantiles"]),
@@ -81,6 +88,11 @@ def load_robustness_config(config_path: Path) -> RobustnessConfig:
         slippage_scenarios_bp=tuple(int(value) for value in costs["slippage_scenarios_bp"]),
         annualization_days=int(research["annualization_days"]),
         risk_free_rate=float(research["risk_free_rate"]),
+        initial_capital=float(research.get("initial_capital", 100_000_000.0)),
+        adv_window=int(capacity.get("adv_window", 20)),
+        adv_fraction=float(adv_fraction) if adv_fraction is not None else None,
+        min_adv_periods=int(capacity.get("min_adv_periods", 10)),
+        minimum_commission=float(costs["minimum_commission"]) if costs.get("minimum_commission") is not None else None,
     )
     validate_config(config)
     return config
@@ -120,6 +132,10 @@ def _portfolio_config(config: RobustnessConfig, quantile: float) -> PortfolioCon
         execution=config.execution,
         execution_availability=config.execution_availability,
         normal_trading_status=config.normal_trading_status,
+        initial_capital=config.initial_capital,
+        adv_window=config.adv_window,
+        adv_fraction=config.adv_fraction,
+        min_adv_periods=config.min_adv_periods,
     )
 
 
@@ -302,7 +318,7 @@ def render_report(outputs: RobustnessOutputs, config: RobustnessConfig) -> str:
         "- Quarterly 使用 3/6/9/12 月现有月末信号，下一交易日开盘执行，持有至下一季度执行；共有 46 个季度信号，2025-12-31 仅为无后续执行日的末端候选。",
         "- 选股边界同分全部保留并等权，因此实际选股比例可能略高于名义比例。无法买入留现金，待卖出恢复可交易后卖出。",
         f"- 统一评价区间：{metrics.start_date.iloc[0]:%Y-%m-%d} 至 {metrics.end_date.iloc[0]:%Y-%m-%d}，共 {int(metrics.observation_count.iloc[0]):,} 个日收益；年化交易日数 {config.annualization_days}，年化无风险利率 {config.risk_free_rate:.2%}。",
-        "- 0 bp 仅表示无滑点，仍包含买卖双边 3 bp 佣金和卖出印花税；最低佣金不计。",
+        f"- 0 bp 仅表示无滑点，仍包含买卖双边 3 bp 佣金、每笔最低 {config.minimum_commission if config.minimum_commission is not None else 0:.2f} 元和卖出印花税；初始资金 {config.initial_capital:,.0f} 元。",
         "", "## 指标公式", "",
         "- 累计收益 = `∏(1 + 日收益) - 1`；年化收益 = `(1 + 累计收益)^(252 / 日收益数) - 1`。",
         "- 年化波动率 = 日收益样本标准差（`ddof=1`）× `√252`；Sharpe = 日超额收益均值 ÷ 日收益样本标准差 × `√252`。",
@@ -342,8 +358,8 @@ def render_report(outputs: RobustnessOutputs, config: RobustnessConfig) -> str:
         "- `robustness_portfolio_summary.csv`：逐期选股比例、信号日和执行日。",
         "", "## 研究限制", "",
         "- 策略执行日使用开盘至收盘收益，H00300 使用完整日收益，盘中起点不完全一致。",
-        "- 涨跌停无法可靠识别；正常交易状态和有效开盘价不构成一定能够成交的保证。",
-        "- 缺少真实初始资金和订单金额，最低佣金未纳入。",
+        "- 涨跌停按开盘价与交易所昨收重建的限价拒单；开盘未封板但盘中被封、或一字板打开后的成交仍未建模。",
+        "- ADV 容量按信号日 20 日 ADV 与初始资金计算，是目标权重级上限，不是逐笔冲击模型。",
         "- 双边 3 bp 佣金和 0/10/20 bp 滑点是研究假设，不代表特定券商费率或真实冲击。",
         "- PE 使用按信号日前已披露财报重建的 TTM 净利润；供应商 `PE1TTM` 实测含前视，本网格沿用重建口径。",
         "- 本步骤只做参数敏感性事实总结，不依据全样本结果修改策略或选择最佳参数。", "",
@@ -365,7 +381,14 @@ def build_robustness_outputs(
     summary_frames: list[pd.DataFrame] = []
     baseline = pd.DataFrame()
     performance_config = PerformanceConfig(config.processed_dir, config.annualization_days, config.risk_free_rate)
-    cost_config = CostConfig(config.processed_dir, config.commission_rate, config.stamp_duty_rates, config.slippage_scenarios_bp)
+    cost_config = CostConfig(
+        config.processed_dir,
+        config.commission_rate,
+        config.stamp_duty_rates,
+        config.slippage_scenarios_bp,
+        config.minimum_commission,
+        config.initial_capital,
+    )
     backtest_config = BacktestConfig(config.processed_dir, config.normal_trading_status)
 
     quantile_order = (0.2,) + tuple(value for value in config.selection_quantiles if value != 0.2)
@@ -417,7 +440,7 @@ def run(config: RobustnessConfig) -> RobustnessOutputs:
     factor_details = pd.read_parquet(p / "factor_details.parquet")
     daily = pd.read_parquet(p / "daily_trading.parquet", columns=[
         "stock_code", "trade_date", "open_price", "close_price", "total_return",
-        "PreClosePrice", "trading_status", "quality_flags",
+        "PreClosePrice", "Markettype", "trading_status", "market_type", "quality_flags", "Dnvaltrd",
     ])
     benchmark = pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"])
     pool = pd.read_parquet(p / "historical_universe.parquet", columns=["signal_date", "stock_code"])

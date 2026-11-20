@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Sequence
 
+from src.attribution import main as attribution_main
 from src.backtest import main as backtest_main
 from src.costs import main as costs_main
 from src.data_loader import main as clean_main
 from src.factor_test import main as factor_test_main
 from src.factors import main as factors_main
 from src.market_cap import main as market_cap_main
+from src.momentum_variants import main as momentum_variants_main
 from src.performance import main as performance_main
 from src.portfolio import main as portfolio_main
 from src.robustness import main as robustness_main
@@ -23,10 +25,12 @@ STEPS: dict[str, Callable[[list[str]], None]] = {
     "marketcap": market_cap_main,
     "factors": factors_main,
     "evaluate": factor_test_main,
+    "momvariants": momentum_variants_main,
     "portfolio": portfolio_main,
     "backtest": backtest_main,
     "costs": costs_main,
     "performance": performance_main,
+    "attribute": attribution_main,
     "robustness": robustness_main,
     "figures": figures_main,
 }

@@ -24,7 +24,12 @@ benchmark:
   return_unit: percent
 
 factors:
-  momentum_lookback_months: 6
+  # 主因子 12-1；6-1 与 1M 反转作为并列变体，不进入主组合。
+  momentum_lookback_months: 12
+  momentum_skip_months: 1
+  momentum_variants:
+    - {name: momentum_6_1, lookback_months: 6, skip_months: 1, higher_is_better: true}
+    - {name: momentum_1m, lookback_months: 1, skip_months: 0, higher_is_better: false}
   quantile_groups: 5
   value_metric: disclosure_timed_pe   # 披露日 TTM 净利润 ÷ 总市值
   value_metric_vendor: PE1TTM          # 供应商字段，仅作逐月对照
@@ -67,7 +72,7 @@ costs:
   # 成本假设。所有比例均按单边实际成交金额计算。
   commission_rate: 0.0003
   commission_source: research_assumption
-  minimum_commission: null
+  minimum_commission: 5.0
   stamp_duty_rates:
     - start_date: 2014-01-01
       sell_rate: 0.001
@@ -80,6 +85,19 @@ costs:
 research:
   annualization_days: 252
   risk_free_rate: 0.0
+  initial_capital: 100000000
+
+capacity:
+  # 单票目标权重 <= 信号日 N 日 ADV × adv_fraction / 初始资金；超出部分留现金。
+  adv_window: 20
+  adv_fraction: 0.05
+  min_adv_periods: 10
+
+attribution:
+  annualization_months: 12
+  min_months: 24
+  min_cap_coverage: 0.80
+  long_short_score_types: [raw, neutral]
 
 robustness:
   selection_quantiles: [0.1, 0.2, 0.3]

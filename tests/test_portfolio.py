@@ -5,7 +5,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.portfolio import PortfolioConfig, build_portfolio_outputs, select_targets, validate_outputs
+from src.portfolio import (
+    PortfolioConfig,
+    apply_adv_cap,
+    build_portfolio_outputs,
+    select_targets,
+    validate_outputs,
+)
 
 
 def _config(selection_quantile: float = 0.2) -> PortfolioConfig:
@@ -79,6 +85,27 @@ def test_all_equal_scores_and_small_sample_never_create_an_empty_target() -> Non
     selected = select_targets(pd.DataFrame(rows), _config(0.1))
     assert selected.groupby("factor")["stock_code"].size().eq(3).all()
     assert selected.groupby("factor")["target_weight"].sum().eq(1).all()
+
+
+def test_adv_cap_leaves_excess_target_weight_as_cash() -> None:
+    config = PortfolioConfig(
+        processed_dir=Path("data/processed"), selection_quantile=0.2, weighting="equal",
+        selection_tie_policy="preserve_boundary_ties", execution="next_trading_day_open",
+        execution_availability="normal_trading_status_and_valid_open_price", normal_trading_status="1",
+        initial_capital=1_000_000.0, adv_window=20, adv_fraction=0.05, min_adv_periods=10,
+    )
+    targets = pd.DataFrame({
+        "factor": ["pe"], "signal_date": [pd.Timestamp("2021-02-26")],
+        "stock_code": ["000001"], "target_weight": [1.0],
+    })
+    daily = pd.DataFrame({
+        "stock_code": ["000001"] * 25,
+        "trade_date": pd.date_range("2021-01-29", periods=25, freq="B"),
+        "trade_amount": [1000.0] * 25,
+    })
+    capped = apply_adv_cap(targets, daily, config)
+    assert capped.iloc[0]["capacity_capped"]
+    assert capped.iloc[0]["target_weight"] == pytest.approx(1000.0 * 0.05 / 1_000_000.0)
 
 
 def test_actions_audit_buy_sell_and_execution_failures_without_replacement() -> None:

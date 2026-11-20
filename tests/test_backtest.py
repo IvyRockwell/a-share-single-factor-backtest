@@ -175,6 +175,35 @@ def test_valid_open_with_missing_close_freezes_post_trade_open_value() -> None:
     assert holdings.set_index("stock_code").loc["A", "valuation_status"] == "frozen_at_post_trade_open_value"
     assert holdings["close_value"].notna().all()
 
+def test_opening_limit_up_blocks_a_buy_and_leaves_cash() -> None:
+    targets, actions = _inputs([("2021-01-29", "2021-02-01", {"A": 1.0})])
+    daily = _market([
+        {"stock_code": "A", "trade_date": "2021-02-01", "open_price": 110.0,
+         "close_price": 110.0, "PreClosePrice": "100", "Markettype": "1"},
+    ])
+    output = build_backtest_outputs(targets, actions, daily, _benchmark(["2021-02-01"]), CONFIG)
+    day = output.daily.loc[output.daily["factor"].eq("pe")].iloc[0]
+    assert day["nav"] == pytest.approx(1.0)
+    record = output.rebalance_records.loc[output.rebalance_records["factor"].eq("pe")].iloc[0]
+    assert record["reason"] == "limit_up_open"
+
+
+def test_backtest_engine_accepts_a_custom_factor_set_and_no_actions() -> None:
+    targets = pd.DataFrame({
+        "factor": ["benchmark"],
+        "signal_date": [pd.Timestamp("2021-01-29")],
+        "execution_date": [pd.Timestamp("2021-02-01")],
+        "stock_code": ["A"],
+        "target_weight": [1.0],
+    })
+    daily = _market([{"stock_code": "A", "trade_date": "2021-02-01"}])
+    output = build_backtest_outputs(
+        targets, None, daily, _benchmark(["2021-02-01"]), CONFIG, factors=("benchmark",)
+    )
+    assert set(output.daily["factor"]) == {"benchmark"}
+    assert output.daily["nav"].iloc[-1] == pytest.approx(1.0)
+
+
 def test_universe_benchmarks_are_equal_and_cap_weighted() -> None:
     from src.backtest import _universe_returns
 

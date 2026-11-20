@@ -197,10 +197,11 @@ def available_score_types(factor_details: pd.DataFrame) -> list[tuple[str, str, 
 def build_factor_test_details(factor_details: pd.DataFrame, forward_returns: pd.DataFrame,
                               quantile_groups: int, score_type: str = "raw",
                               score_suffix: str = "_score",
-                              eligibility_suffix: str = "_is_rankable") -> pd.DataFrame:
+                              eligibility_suffix: str = "_is_rankable",
+                              factors: tuple[str, ...] = FACTORS) -> pd.DataFrame:
     """Expand common forward returns into factor-specific eligibility and groups."""
     frames = []
-    for factor in FACTORS:
+    for factor in factors:
         frame = factor_details[["signal_date", "stock_code"]].copy()
         frame["factor"] = factor
         frame["factor_score"] = factor_details[f"{factor}{score_suffix}"].astype("Float64").astype("float64").to_numpy()
@@ -459,7 +460,7 @@ def render_report(outputs: FactorTestOutputs) -> str:
                 f"{fmt_period(row.ic_win_rate)} | {fmt_period(row.spread_mean)} | {fmt_period(row.spread_t_nw)} |"
             )
     lines.extend(["", "## 口径限制", "", "- 2025-12-31 没有后续持有期数据，未进入分组收益或 IC。",
-                  "- Momentum 在 2014-09 至 2015-02 没有可用六个月历史价格，未进行分组或 IC。",
+                  "- 主 Momentum 为 12-1；2014-09 至 2015-08 没有可用的 12 个月历史价格，未进行分组或 IC。6-1 与 1M 反转的样本见 `reports/generated/momentum-variants.md`。",
                   "- PE 按信号日前已实际披露财报重建的 TTM 净利润计算，不使用供应商 `PE1TTM`；逐月对照见 `pe_pit_check.csv`。", ""])
     return "\n".join(lines)
 

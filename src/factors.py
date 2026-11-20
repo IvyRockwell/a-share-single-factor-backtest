@@ -16,11 +16,23 @@ MIN_NEUTRAL_ROWS = 100
 
 
 @dataclass(frozen=True)
+class MomentumVariant:
+    """One momentum definition tested beside the primary factor."""
+
+    name: str
+    lookback_months: int
+    skip_months: int
+    higher_is_better: bool = True
+
+
+@dataclass(frozen=True)
 class FactorConfig:
-    """Locations, the Momentum window, and the neutralization controls."""
+    """Locations, the Momentum windows, and the neutralization controls."""
 
     processed_dir: Path
     momentum_lookback_months: int
+    momentum_skip_months: int = 1
+    momentum_variants: tuple[MomentumVariant, ...] = ()
     neutralize: bool = True
     industry_standard: str = "P0207"
     min_group_size: int = 20
@@ -38,9 +50,21 @@ def load_factor_config(config_path: Path) -> FactorConfig:
         settings = yaml.safe_load(handle)
     root = config_path.parent.parent
     neutralization = settings.get("neutralization") or {}
+    factor_settings = settings["factors"]
+    variants = tuple(
+        MomentumVariant(
+            name=str(item["name"]),
+            lookback_months=int(item["lookback_months"]),
+            skip_months=int(item.get("skip_months", 1)),
+            higher_is_better=bool(item.get("higher_is_better", True)),
+        )
+        for item in (factor_settings.get("momentum_variants") or [])
+    )
     return FactorConfig(
         processed_dir=root / settings["data"]["processed_dir"],
-        momentum_lookback_months=int(settings["factors"]["momentum_lookback_months"]),
+        momentum_lookback_months=int(factor_settings["momentum_lookback_months"]),
+        momentum_skip_months=int(factor_settings.get("momentum_skip_months", 1)),
+        momentum_variants=variants,
         neutralize=bool(neutralization.get("enabled", True)),
         industry_standard=str(neutralization.get("industry_standard", "P0207")),
         min_group_size=int(neutralization.get("min_group_size", 20)),
@@ -101,45 +125,81 @@ def add_pe_factor(pool: pd.DataFrame, valuation: pd.DataFrame, panel: pd.DataFra
     return result.drop(columns=["market_cap"])
 
 
-def add_momentum_factor(pool: pd.DataFrame, daily: pd.DataFrame, lookback_months: int) -> pd.DataFrame:
+def add_momentum_factor(pool: pd.DataFrame, daily: pd.DataFrame, lookback_months: int,
+                        skip_months: int = 1, name: str = "momentum",
+                        higher_is_better: bool = True) -> pd.DataFrame:
+    """Add one point-in-time momentum definition to every pool row.
+
+    ``lookback`` is measured from the signal date; ``skip`` excludes the most
+    recent month.  The default 12-1 definition therefore uses prices from
+    ``signal - 12m`` to ``signal - 1m`` and never touches the last month.
+    """
+    if lookback_months <= 0:
+        raise ValueError("lookback_months must be positive.")
+    if skip_months < 0 or skip_months >= lookback_months:
+        raise ValueError("skip_months must be non-negative and smaller than lookback_months.")
+    pool = pool.reset_index(drop=True)
     prices = daily[["stock_code", "trade_date", "adjusted_close", "quality_flags"]].copy()
     if prices.duplicated(["stock_code", "trade_date"]).any():
         raise ValueError("Daily trading data contains duplicate (stock_code, trade_date) keys.")
     prices["price_is_invalid"] = prices["quality_flags"].fillna("").str.contains("invalid_adjusted_close")
-    signal_prices = prices.rename(columns={
-        "trade_date": "signal_date", "adjusted_close": "momentum_signal_adjusted_close",
-        "price_is_invalid": "momentum_signal_price_invalid",
-    })[["stock_code", "signal_date", "momentum_signal_adjusted_close", "momentum_signal_price_invalid"]]
-    result = pool.merge(signal_prices, on=["signal_date", "stock_code"], how="left", validate="one_to_one")
-    result["momentum_target_date"] = result["signal_date"] - pd.DateOffset(months=lookback_months)
-
-    valid_starts = prices.loc[
+    valid = prices.loc[
         prices["adjusted_close"].gt(0) & ~prices["price_is_invalid"],
         ["stock_code", "trade_date", "adjusted_close"],
-    ].rename(columns={"trade_date": "momentum_start_date", "adjusted_close": "momentum_start_adjusted_close"})
-    left = result[["stock_code", "momentum_target_date"]].sort_values("momentum_target_date")
-    right = valid_starts.sort_values("momentum_start_date")
+    ].rename(columns={"trade_date": "price_date", "adjusted_close": "price"})
+    valid = valid.sort_values("price_date")
+
+    left = pool[["stock_code", "signal_date"]].copy()
+    left["row_id"] = np.arange(len(left))
+    left["start_target"] = left["signal_date"] - pd.DateOffset(months=lookback_months)
+    left["end_target"] = left["signal_date"] - pd.DateOffset(months=skip_months) if skip_months else left["signal_date"]
+    left = left.sort_values("start_target")
     starts = pd.merge_asof(
-        left, right, left_on="momentum_target_date", right_on="momentum_start_date",
-        by="stock_code", direction="backward", allow_exact_matches=True,
+        left, valid.rename(columns={"price_date": "start_date", "price": "start_price"}),
+        left_on="start_target", right_on="start_date", by="stock_code",
+        direction="backward", allow_exact_matches=True,
     )
-    result = result.join(starts[["momentum_start_date", "momentum_start_adjusted_close"]])
-    signal_invalid = result["momentum_signal_price_invalid"].fillna(False)
-    result["momentum_6m_return"] = (
-        result["momentum_signal_adjusted_close"] / result["momentum_start_adjusted_close"] - 1
+    starts = starts.sort_values("end_target")
+    ends = pd.merge_asof(
+        starts, valid.rename(columns={"price_date": "end_date", "price": "end_price"}),
+        left_on="end_target", right_on="end_date", by="stock_code",
+        direction="backward", allow_exact_matches=True,
     )
-    result["momentum_is_rankable"] = (
-        result["momentum_signal_adjusted_close"].gt(0)
-        & ~signal_invalid
-        & result["momentum_start_adjusted_close"].gt(0)
+    result = pool.copy()
+    result["row_id"] = np.arange(len(result))
+    result = result.merge(
+        ends[["row_id", "start_target", "end_target", "start_date", "start_price", "end_date", "end_price"]],
+        on="row_id", how="left", validate="one_to_one",
+    ).set_index("row_id", drop=True)
+    result = result.sort_index()
+    result[f"{name}_start_target"] = result["start_target"]
+    result[f"{name}_end_target"] = result["end_target"]
+    result[f"{name}_start_date"] = result["start_date"]
+    result[f"{name}_end_date"] = result["end_date"]
+    result[f"{name}_start_price"] = result["start_price"]
+    result[f"{name}_end_price"] = result["end_price"]
+    result[f"{name}_return"] = result["end_price"] / result["start_price"] - 1
+    result[f"{name}_is_rankable"] = (
+        result["start_price"].gt(0)
+        & result["end_price"].gt(0)
+        & result["start_date"].notna()
+        & result["end_date"].notna()
+        & result["start_date"].lt(result["end_date"])
     )
-    result["momentum_unrankable_reason"] = _reason_from_conditions(result, [
-        ("missing_or_invalid_signal_adjusted_close", result["momentum_signal_adjusted_close"].isna() | signal_invalid),
-        ("nonpositive_signal_adjusted_close", result["momentum_signal_adjusted_close"].le(0)),
-        ("no_valid_price_on_or_before_lookback_date", result["momentum_start_adjusted_close"].isna()),
+    result[f"{name}_unrankable_reason"] = _reason_from_conditions(result, [
+        ("no_valid_price_on_or_before_start_date", result["start_price"].isna()),
+        ("no_valid_price_on_or_before_end_date", result["end_price"].isna()),
+        ("nonpositive_start_price", result["start_price"].le(0)),
+        ("nonpositive_end_price", result["end_price"].le(0)),
+        ("end_date_not_after_start_date", result["start_date"].notna() & result["end_date"].notna() & result["end_date"].le(result["start_date"])),
     ])
-    _rank_factor(result, "momentum_6m_return", "momentum_is_rankable", "momentum_score", "momentum_rank", higher_is_better=True)
-    return result.drop(columns=["momentum_signal_price_invalid"])
+    _rank_factor(
+        result, f"{name}_return", f"{name}_is_rankable",
+        f"{name}_score", f"{name}_rank", higher_is_better=higher_is_better,
+    )
+    return result.drop(columns=[
+        "start_target", "end_target", "start_date", "start_price", "end_date", "end_price",
+    ])
 
 
 def add_roe_factor(pool: pd.DataFrame, financials: pd.DataFrame) -> pd.DataFrame:
@@ -287,7 +347,15 @@ def build_factor_details(pool: pd.DataFrame, valuation: pd.DataFrame, daily: pd.
     ttm = build_ttm_net_profit(financials)
     panel = build_pit_panel(pool[["signal_date", "stock_code"]], ttm)
     result = add_pe_factor(pool[["signal_date", "stock_code"]].copy(), valuation, panel, market_cap)
-    result = add_momentum_factor(result, daily, config.momentum_lookback_months)
+    result = add_momentum_factor(
+        result, daily, config.momentum_lookback_months, config.momentum_skip_months,
+        "momentum", True,
+    )
+    for variant in config.momentum_variants:
+        result = add_momentum_factor(
+            result, daily, variant.lookback_months, variant.skip_months,
+            variant.name, variant.higher_is_better,
+        )
     result = add_roe_factor(result, financials)
     if market_cap is not None:
         result = attach_exposures(result, market_cap, industry, config.industry_standard)
@@ -301,7 +369,7 @@ def build_factor_details(pool: pd.DataFrame, valuation: pd.DataFrame, daily: pd.
 
 FACTOR_COLUMNS = {
     "pe": ("pe_pit", "pe_is_rankable", "pe_unrankable_reason"),
-    "momentum": ("momentum_6m_return", "momentum_is_rankable", "momentum_unrankable_reason"),
+    "momentum": ("momentum_return", "momentum_is_rankable", "momentum_unrankable_reason"),
     "roe": ("roe", "roe_is_rankable", "roe_unrankable_reason"),
 }
 
@@ -350,8 +418,13 @@ def validate_outputs(outputs: FactorOutputs, pool: pd.DataFrame) -> None:
                 raise ValueError(f"Neutral {factor} scores do not match their eligibility flag.")
             if neutral[eligible].le(0).any() or neutral[eligible].gt(1).any():
                 raise ValueError(f"Neutral {factor} scores do not fall in (0, 1].")
-    if (details.loc[details["momentum_is_rankable"], "momentum_start_date"] > details.loc[details["momentum_is_rankable"], "momentum_target_date"]).any():
-        raise ValueError("Momentum used a price after its six-month lookback target date.")
+    momentum = details.loc[details["momentum_is_rankable"]]
+    if (momentum["momentum_start_date"] >= momentum["momentum_end_date"]).any():
+        raise ValueError("Momentum start price is not before its end price.")
+    if (momentum["momentum_start_date"] > momentum["momentum_start_target"]).any():
+        raise ValueError("Momentum used a price after its start target date.")
+    if (momentum["momentum_end_date"] > momentum["momentum_end_target"]).any():
+        raise ValueError("Momentum used a price after its end target date.")
     if (details.loc[details["roe_is_rankable"], "roe_actual_disclosure_date"] >= details.loc[details["roe_is_rankable"], "signal_date"]).any():
         raise ValueError("ROE used a report disclosed on or after its signal date.")
 
@@ -362,7 +435,7 @@ def render_report(outputs: FactorOutputs) -> str:
         "# PE / Momentum / ROE 因子", "", "## 已执行规则", "",
         "- 仅在月末历史股票池内计算；每个因子分别保留有效样本及不可排名原因。",
         "- PE 使用按实际披露日重建的 TTM 净利润（`pe_pit`）：只取信号日前严格已披露的最新报告，年报直接取净利润，季报用「本期 + 上年年报 − 上年同期」拼出 TTM；净利润与市值均为正时参与排名，低 PE 得到更高分数。",
-        "- Momentum 使用信号日与不晚于六个自然月前目标日的最近有效 `adjusted_close`，高收益得到更高分数。",
+        "- Momentum 主因子为 12-1（信号日前 12 个月到前 1 个月）；6-1 与 1M 反转作为变体并列检验，1M 反转是低收益得高分。",
         "- ROE 使用信号日前严格已披露的最新合并年度报告（同披露日取最新报告期），高 ROE 得到更高分数。",
         "- 分数为当期有效样本内的反向名次比例，最高看好为 `1.0`；同值采用平均名次。", "",
         "## 重要限制", "",
@@ -500,7 +573,8 @@ def run(config: FactorConfig) -> FactorOutputs:
     directory = config.processed_dir
     pool = pd.read_parquet(directory / "historical_universe.parquet", columns=["signal_date", "stock_code"])
     valuation = pd.read_parquet(directory / "valuation.parquet", columns=["stock_code", "trading_date", "pe_ttm"])
-    earliest_target = pool["signal_date"].min() - pd.DateOffset(months=config.momentum_lookback_months)
+    lookbacks = [config.momentum_lookback_months] + [variant.lookback_months for variant in config.momentum_variants]
+    earliest_target = pool["signal_date"].min() - pd.DateOffset(months=max(lookbacks))
     daily = pd.read_parquet(
         directory / "daily_trading.parquet", columns=["stock_code", "trade_date", "adjusted_close", "quality_flags"],
         filters=[("trade_date", ">=", earliest_target), ("trade_date", "<=", pool["signal_date"].max())],

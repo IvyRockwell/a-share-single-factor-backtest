@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from src.trading_rules import trade_block_reason
+
 FACTORS = ("pe", "momentum", "roe")
 RELATIVE_VALUE_TOLERANCE = 1e-12
 
@@ -76,14 +78,13 @@ def _valid_return_mask(frame: pd.DataFrame) -> pd.Series:
         "invalid_total_return", regex=False)
 
 
-def _can_trade(row: pd.Series | None, normal: str) -> bool:
-    return (
-        row is not None
-        and str(row["trading_status"]) == normal
-        and pd.notna(row["open_price"])
-        and float(row["open_price"]) > 0
-        and "invalid_open_price" not in str(row.get("quality_flags", ""))
-    )
+def _can_trade(row: pd.Series | None, normal: str, side: str = "buy") -> bool:
+    return row is not None and trade_block_reason(row, normal, side) is None
+
+
+def _block_reason(row: pd.Series | None, normal: str, side: str) -> str:
+    reason = trade_block_reason(row, normal, side) if row is not None else None
+    return reason or "missing_or_non_normal_trading_or_invalid_open"
 
 
 def _open_factor(row: pd.Series | None) -> float:
@@ -107,19 +108,29 @@ def _close_open_factor(row: pd.Series | None) -> float:
     return float(row["close_price"]) / float(row["open_price"])
 
 
-def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: pd.DataFrame,
+def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame | None, daily: pd.DataFrame,
                            benchmark: pd.DataFrame, config: BacktestConfig,
                            pool: pd.DataFrame | None = None,
-                           market_cap: pd.DataFrame | None = None) -> BacktestOutputs:
-    """Restore target equal weights at each open and retain only failed full exits."""
+                           market_cap: pd.DataFrame | None = None,
+                           factors: tuple[str, ...] = FACTORS) -> BacktestOutputs:
+    """Restore target equal weights at each open and retain only failed full exits.
+
+    ``factors`` lets the same execution and valuation engine price a synthetic
+    benchmark portfolio (all pool members, fixed weights) without changing the
+    strategy path.  ``actions`` is retained for API compatibility but the engine
+    only needs ``targets``; pass ``None`` for a synthetic benchmark.
+    """
     executable_dates = targets.loc[targets["execution_date"].notna(), "execution_date"]
     if executable_dates.empty:
         raise ValueError("No execution dates are available.")
+    if not factors:
+        raise ValueError("At least one factor is required.")
     start = executable_dates.min()
     daily = daily.loc[daily["trade_date"].ge(start)].copy()
     daily["PreClosePrice"] = pd.to_numeric(daily["PreClosePrice"], errors="coerce")
     daily = daily.sort_values(["trade_date", "stock_code"])
-    actions = actions.loc[actions["execution_date"].notna()].copy()
+    if actions is not None:
+        actions = actions.loc[actions["execution_date"].notna()].copy()
     targets = targets.loc[targets["execution_date"].notna()].copy()
     by_target_day = {(f, d): x for (f, d), x in targets.groupby(["factor", "execution_date"], sort=False)}
     bench = benchmark.loc[benchmark["trade_date"].ge(start)].copy().set_index("trade_date")
@@ -140,7 +151,7 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
         signal_for_day = {
             day: signal_dates[position] for day, position in zip(day_values, positions) if position >= 0
         }
-    states = {f: {"cash": 1.0, "positions": {}, "pending": {}, "prior_nav": 1.0} for f in FACTORS}
+    states = {f: {"cash": 1.0, "positions": {}, "pending": {}, "prior_nav": 1.0} for f in factors}
     daily_rows, holding_rows, record_rows = [], [], []
 
     def record(
@@ -165,7 +176,7 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
         ew_ret, cw_ret = (
             _universe_returns(group, signal, members, cap_weights) if signal is not None else (np.nan, np.nan)
         )
-        for factor in FACTORS:
+        for factor in factors:
             state = states[factor]
             positions: dict[str, float] = state["positions"]
             target_frame = by_target_day.get((factor, day), pd.DataFrame())
@@ -190,7 +201,7 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
 
             for code in sorted(list(state["pending"])):
                 row = rows.get(code)
-                if _can_trade(row, config.normal_trading_status):
+                if _can_trade(row, config.normal_trading_status, "sell"):
                     value = opening.get(code, positions[code])
                     state["cash"] += value
                     positions.pop(code, None)
@@ -202,7 +213,7 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
                            pre_trade_open.get(code, value), 0.0, value, value, np.nan)
                 elif code not in pending_before:
                     record(factor, day, state["pending"][code], code, "sell", "complete_exit", "pending_sale",
-                           "missing_or_non_normal_trading_or_invalid_open", 0.0,
+                           _block_reason(row, config.normal_trading_status, "sell"), 0.0,
                            pre_trade_open.get(code, positions.get(code, 0.0)), 0.0,
                            pre_trade_open.get(code, positions.get(code, 0.0)), 0.0, np.nan)
 
@@ -220,7 +231,7 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
                     row = rows.get(code)
                     if difference < 0:
                         requested = -difference
-                        if _can_trade(row, config.normal_trading_status):
+                        if _can_trade(row, config.normal_trading_status, "sell"):
                             opening[code] = current - requested
                             state["cash"] += requested
                             traded_at_open.add(code)
@@ -229,15 +240,15 @@ def build_backtest_outputs(targets: pd.DataFrame, actions: pd.DataFrame, daily: 
                                    target_value, requested, requested, np.nan)
                         else:
                             record(factor, day, signal, code, "sell", "rebalance_reduce", "adjustment_not_executed",
-                                   "missing_or_non_normal_trading_or_invalid_open", weight, current,
+                                   _block_reason(row, config.normal_trading_status, "sell"), weight, current,
                                    target_value, requested, 0.0, np.nan)
                     else:
                         trade_reason = "rebalance_increase" if code in positions else "new_entry"
-                        if _can_trade(row, config.normal_trading_status):
+                        if _can_trade(row, config.normal_trading_status, "buy"):
                             buy_candidates.append((code, difference, current, target_value, trade_reason))
                         else:
                             record(factor, day, signal, code, "buy", trade_reason, "unfilled_cash",
-                                   "missing_or_non_normal_trading_or_invalid_open", weight, current,
+                                   _block_reason(row, config.normal_trading_status, "buy"), weight, current,
                                    target_value, difference, 0.0, 0.0)
 
                 requested_sum = sum(item[1] for item in buy_candidates)
@@ -329,7 +340,7 @@ def run(config: BacktestConfig) -> BacktestOutputs:
     p = config.processed_dir
     pool = pd.read_parquet(p / "historical_universe.parquet", columns=["signal_date", "stock_code"])
     market_cap = pd.read_parquet(p / "market_cap.parquet", columns=["signal_date", "stock_code", "market_cap", "has_market_cap"])
-    outputs = build_backtest_outputs(pd.read_parquet(p / "portfolio_targets.parquet"), pd.read_parquet(p / "portfolio_rebalance_actions.parquet"), pd.read_parquet(p / "daily_trading.parquet", columns=["stock_code", "trade_date", "open_price", "close_price", "total_return", "PreClosePrice", "trading_status", "quality_flags"]), pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"]), config, pool, market_cap)
+    outputs = build_backtest_outputs(pd.read_parquet(p / "portfolio_targets.parquet"), pd.read_parquet(p / "portfolio_rebalance_actions.parquet"), pd.read_parquet(p / "daily_trading.parquet", columns=["stock_code", "trade_date", "open_price", "close_price", "total_return", "PreClosePrice", "trading_status", "market_type", "quality_flags"]), pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"]), config, pool, market_cap)
     validate_outputs(outputs)
     outputs.daily.to_parquet(p / "backtest_daily_returns.parquet", index=False); outputs.monthly.to_csv(p / "backtest_monthly_returns.csv", index=False, encoding="utf-8-sig"); outputs.holdings.to_parquet(p / "backtest_holdings.parquet", index=False); outputs.rebalance_records.to_parquet(p / "backtest_rebalance_records.parquet", index=False)
     report_dir = p.parent.parent / "reports" / "generated"

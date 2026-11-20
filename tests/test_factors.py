@@ -6,7 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.factors import FactorConfig, FactorOutputs, build_factor_details, build_quality_summary, validate_outputs
+from src.factors import (
+    FactorConfig,
+    FactorOutputs,
+    MomentumVariant,
+    build_factor_details,
+    build_quality_summary,
+    validate_outputs,
+)
 
 CONFIG = FactorConfig(Path("processed"), 6)
 
@@ -40,12 +47,26 @@ def _market_cap() -> pd.DataFrame:
 
 
 def _daily() -> pd.DataFrame:
-    return pd.DataFrame({
-        "stock_code": ["000001", "000001", "000002", "000002", "000003", "000003", "000004", "000004"],
-        "trade_date": pd.to_datetime(["2021-01-29", "2021-07-30", "2021-01-28", "2021-07-30", "2021-01-29", "2021-07-30", "2021-01-29", "2021-07-30"]),
-        "adjusted_close": [10.0, 12.0, 10.0, 11.0, 0.0, 12.0, 10.0, None],
-        "quality_flags": ["", "", "", "", "", "", "", "invalid_adjusted_close"],
-    })
+    rows = [
+        ("000001", "2020-07-30", 8.0, ""),
+        ("000001", "2021-01-29", 10.0, ""),
+        ("000001", "2021-06-30", 12.0, ""),
+        ("000001", "2021-07-30", 12.0, ""),
+        ("000002", "2020-07-30", 10.0, ""),
+        ("000002", "2021-01-28", 10.0, ""),
+        ("000002", "2021-06-30", 10.0, ""),
+        ("000002", "2021-07-30", 11.0, ""),
+        ("000003", "2021-01-29", 0.0, ""),
+        ("000003", "2021-06-30", 12.0, ""),
+        ("000003", "2021-07-30", 12.0, ""),
+        ("000004", "2020-07-30", 10.0, ""),
+        ("000004", "2021-01-29", 10.0, ""),
+        ("000004", "2021-06-30", None, "invalid_adjusted_close"),
+        ("000004", "2021-07-30", None, "invalid_adjusted_close"),
+    ]
+    frame = pd.DataFrame(rows, columns=["stock_code", "trade_date", "adjusted_close", "quality_flags"])
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+    return frame
 
 
 def _financials() -> pd.DataFrame:
@@ -74,10 +95,10 @@ def test_factor_rules_cover_ranking_momentum_and_roe_availability() -> None:
     assert rows.loc["000004", "pe_unrankable_reason"] == "missing_market_cap"
 
     assert rows.loc["000002", "momentum_start_date"] == pd.Timestamp("2021-01-28")
-    assert rows.loc["000001", "momentum_6m_return"] == pytest.approx(0.2)
+    assert rows.loc["000001", "momentum_return"] == pytest.approx(0.2)
     assert rows.loc["000001", "momentum_rank"] == 1
-    assert rows.loc["000003", "momentum_unrankable_reason"] == "no_valid_price_on_or_before_lookback_date"
-    assert rows.loc["000004", "momentum_unrankable_reason"] == "missing_or_invalid_signal_adjusted_close"
+    assert rows.loc["000003", "momentum_unrankable_reason"] == "no_valid_price_on_or_before_start_date"
+    assert rows.loc["000004", "momentum_unrankable_reason"] == "end_date_not_after_start_date"
 
     assert rows.loc["000001", "roe_report_date"] == pd.Timestamp("2020-12-31")
     assert rows.loc["000001", "roe"] == 0.2
@@ -85,6 +106,23 @@ def test_factor_rules_cover_ranking_momentum_and_roe_availability() -> None:
     assert rows.loc["000002", "roe_actual_disclosure_date"] == pd.Timestamp("2021-03-01")
     assert rows.loc["000003", "roe"] == -0.1
     assert rows.loc["000004", "roe_unrankable_reason"] == "missing_or_nonpositive_shareholder_equity"
+
+
+def test_momentum_variants_use_12_1_6_1_and_1m_reversal() -> None:
+    config = FactorConfig(
+        Path("processed"), 12, 1,
+        (MomentumVariant("momentum_6_1", 6, 1), MomentumVariant("momentum_1m", 1, 0, False)),
+    )
+    details = build_factor_details(_pool(), _valuation(), _daily(), _financials(), config, _market_cap())
+    rows = details.set_index("stock_code")
+
+    assert rows.loc["000001", "momentum_return"] == pytest.approx(0.5)
+    assert rows.loc["000001", "momentum_6_1_return"] == pytest.approx(0.2)
+    assert rows.loc["000001", "momentum_1m_return"] == pytest.approx(0.0)
+    assert rows.loc["000001", "momentum_1m_start_date"] == pd.Timestamp("2021-06-30")
+    assert rows.loc["000001", "momentum_1m_end_date"] == pd.Timestamp("2021-07-30")
+    # 1M reversal gives the lower return the higher score.
+    assert rows.loc["000001", "momentum_1m_score"] > rows.loc["000002", "momentum_1m_score"]
 
 
 def test_quality_summary_reconciles_every_factor_independently() -> None:

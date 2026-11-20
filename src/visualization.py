@@ -313,14 +313,14 @@ def plot_gross_nav(inputs: FigureInputs, output: Path) -> None:
     if "ew_benchmark_return" in benchmark.columns:
         equal_weight = (1 + benchmark["ew_benchmark_return"].fillna(0.0)).cumprod()
         ax.plot(benchmark["trade_date"], equal_weight, color=BENCHMARK_COLOR, lw=1.6, linestyle="--",
-                label="等权全 A")
+                label="等权（日频诊断）")
     ax.set_title("三因子策略毛净值与基准")
     ax.set_ylabel("净值（初始值 = 1）")
     ax.set_xlabel("交易日")
     ax.set_ylim(bottom=0)
     _date_axis(ax)
     ax.legend(ncol=4, loc="upper left", frameon=False)
-    _footer(fig, "来源：backtest_daily_returns.parquet｜2014-10-08—2025-12-31｜策略：gross、未扣成本；H00300 与等权全 A 为全收益口径｜执行日策略从开盘开始，基准为完整日收益")
+    _footer(fig, "来源：backtest_daily_returns.parquet｜2014-10-08—2025-12-31｜策略：gross、未扣成本；H00300 与日频等权为全收益口径｜同池月频基准见 attribution.md")
     fig.tight_layout(rect=(0, 0.06, 1, 1))
     _save(fig, output)
 
@@ -556,7 +556,7 @@ def build_figure_index() -> str:
         ("02_factor_pe.png", "PE 的五分位、Q5-Q1 与 Rank IC 如何变化？", "factor_quantile_returns.csv: quantile, cumulative_group_return, q_high_minus_q_low, cumulative_q_high_minus_q_low; factor_ic_series.csv: rank_ic", "分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "每期 Q5-Q1 只计算一次，累计值在同期五个分位行中完全一致。"),
         ("03_factor_momentum.png", "Momentum 的五分位、Q5-Q1 与 Rank IC 如何变化？", "同 02，factor=momentum", "分组未来收益，非策略 gross/net；成本不适用", "2015-03-31—2025-11-28", "前 6 个信号期无完整回看历史，因此不填造结果。"),
         ("04_factor_roe.png", "ROE 的五分位、Q5-Q1 与 Rank IC 如何变化？", "同 02，factor=roe", "分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "分组结果不代表开盘可成交策略。"),
-        ("05_gross_nav_vs_benchmark.png", "三因子毛净值相对基准如何变化？", "backtest_daily_returns.parquet: trade_date, factor, nav, benchmark_nav, ew_benchmark_return", "策略 gross；H00300 与等权全 A 全收益；未扣策略成本", "2014-10-08—2025-12-31", "策略执行日从开盘开始，基准使用完整日收益，盘中起点不完全一致。"),
+        ("05_gross_nav_vs_benchmark.png", "三因子毛净值相对基准如何变化？", "backtest_daily_returns.parquet: trade_date, factor, nav, benchmark_nav, ew_benchmark_return", "策略 gross；H00300 与日频等权为诊断基准；同池月频基准见 attribution.md", "2014-10-08—2025-12-31", "策略执行日从开盘开始，日频基准使用完整日收益；同池月频基准按执行日开盘到下一执行日开盘。"),
         ("06_gross_vs_net.png", "交易成本情景如何改变各因子净值？", "backtest_daily_returns.parquet: nav; backtest_net_daily_returns.parquet: net_nav, slippage_bp", "gross 与 net 0/10/20 bp；0 bp 仍含佣金和印花税", "2014-10-08—2025-12-31", "最低佣金与盘口冲击未纳入；滑点为研究假设。"),
         ("07_drawdowns.png", "各毛收益策略与 H00300 的历史回撤如何比较？", "performance_drawdowns.parquet: series_type, factor, trade_date, drawdown", "策略 gross；H00300 全收益；不展示 net", "2014-10-08—2025-12-31", "策略与基准执行日盘中起点不完全一致。"),
         ("08_monthly_returns.png", "三因子毛收益策略每月表现如何？", "performance_monthly_returns.csv: series_type, factor, month, monthly_return", "仅 gross；未扣成本", "2014-10—2025-12", "统一色阶保留极端月份；缺失格显示为破折号。"),
