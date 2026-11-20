@@ -1,77 +1,44 @@
-"""Tests for the explicit completed-stage command dispatcher."""
+"""Tests for the pipeline command dispatcher."""
 
-
+import pytest
 
 import run
 
 
-def test_stage2_dispatches_to_stage2_runner(monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setattr(run, "stage2_main", lambda argv: calls.append(argv))
-
-    run.main(["stage2"])
-
-    assert calls == [[]]
+def _recorder(calls: list[str]) -> dict[str, object]:
+    return {name: (lambda argv, name=name: calls.append(name)) for name in run.ORDER}
 
 
-def test_stage3_dispatches_to_stage3_runner(monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setattr(run, "stage3_main", lambda argv: calls.append(argv))
+def test_selected_steps_run_in_pipeline_order(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(run, "STEPS", _recorder(calls))
 
-    run.main(["stage3"])
+    run.main(["costs", "clean"])
 
-    assert calls == [[]]
-
-
-def test_stage4_dispatches_to_stage4_runner(monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setattr(run, "stage4_main", lambda argv: calls.append(argv))
-
-    run.main(["stage4"])
-
-    assert calls == [[]]
+    assert calls == ["clean", "costs"]
 
 
-def test_stage8_dispatches_to_stage8_runner(monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setattr(run, "stage8_main", lambda argv: calls.append(argv))
+def test_all_runs_every_step(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(run, "STEPS", _recorder(calls))
 
-    run.main(["stage8"])
+    run.main(["all"])
 
-    assert calls == [[]]
-
-
-def test_stage9_dispatches_to_stage9_runner(monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setattr(run, "stage9_main", lambda argv: calls.append(argv))
-
-    run.main(["stage9"])
-
-    assert calls == [[]]
+    assert calls == list(run.ORDER)
 
 
-def test_stage10_dispatches_to_stage10_runner(monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setattr(run, "stage10_main", lambda argv: calls.append(argv))
-
-    run.main(["stage10"])
-
-    assert calls == [[]]
-
-
-def test_stage11_dispatches_to_stage11_runner(monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setattr(run, "stage11_main", lambda argv: calls.append(argv))
-
-    run.main(["stage11"])
-
-    assert calls == [[]]
-
-
-def test_no_stage_only_shows_help(capsys, monkeypatch) -> None:
-    monkeypatch.setattr(run, "stage2_main", lambda argv: (_ for _ in ()).throw(AssertionError("must not run")))
-    monkeypatch.setattr(run, "stage3_main", lambda argv: (_ for _ in ()).throw(AssertionError("must not run")))
+def test_no_arguments_only_shows_help(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(
+        run,
+        "STEPS",
+        {name: (lambda argv: (_ for _ in ()).throw(AssertionError("must not run"))) for name in run.ORDER},
+    )
 
     run.main([])
 
     assert "usage:" in capsys.readouterr().out
+
+
+def test_unknown_step_is_rejected() -> None:
+    with pytest.raises(SystemExit):
+        run.main(["stage7"])

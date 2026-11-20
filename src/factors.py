@@ -1,4 +1,4 @@
-"""Calculate the confirmed Stage 4 PE, Momentum, and ROE factor inputs."""
+"""Calculate the PE, Momentum, and ROE factor inputs."""
 
 from __future__ import annotations
 
@@ -217,7 +217,7 @@ def _sample_rows(details: pd.DataFrame, factor: str, columns: list[str]) -> pd.D
 def render_report(outputs: FactorOutputs) -> str:
     details, quality = outputs.details, outputs.quality
     lines = [
-        "# 阶段 4：PE / Momentum / ROE 因子", "", "## 已执行规则", "",
+        "# PE / Momentum / ROE 因子", "", "## 已执行规则", "",
         "- 仅在阶段 3 的月末历史股票池计算；每个因子分别保留有效样本及不可排名原因。",
         "- PE 使用信号日 `pe_ttm` 的正值，低 PE 得到更高分数。",
         "- Momentum 使用信号日与不晚于六个自然月前目标日的最近有效 `adjusted_close`，高收益得到更高分数。",
@@ -271,12 +271,14 @@ def run(config: FactorConfig) -> FactorOutputs:
     validate_outputs(outputs, pool)
     details.to_parquet(directory / "factor_details.parquet", index=False)
     quality.to_csv(directory / "factor_period_quality.csv", index=False, encoding="utf-8-sig")
-    (directory.parent.parent / "reports" / "factors_stage4.md").write_text(render_report(outputs), encoding="utf-8")
+    report_dir = directory.parent.parent / "reports" / "generated"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "factors.md").write_text(render_report(outputs), encoding="utf-8")
     return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Calculate the confirmed Stage 4 factor data.")
+    parser = argparse.ArgumentParser(description="Calculate the PE, Momentum, and ROE factor data.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_factor_config(args.config))

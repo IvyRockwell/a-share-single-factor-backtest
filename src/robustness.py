@@ -1,4 +1,4 @@
-"""Run Stage 10 robustness tests without overwriting Stage 6-9 artifacts."""
+"""Run the parameter and cost sensitivity grid."""
 
 from __future__ import annotations
 
@@ -386,7 +386,7 @@ def render_report(outputs: RobustnessOutputs, config: RobustnessConfig) -> str:
     metrics = outputs.metrics.sort_values(["factor", "selection_quantile", "rebalance_frequency", "slippage_bp"])
     insufficient = int(outputs.portfolio_summary["sample_status"].ne("complete").sum())
     lines = [
-        "# 阶段 10：稳健性测试", "", "## 参数与统一口径", "",
+        "# 稳健性测试", "", "## 参数与统一口径", "",
         "- 参数网格：Top 10% / 20% / 30% × Monthly / Quarterly × 0 / 10 / 20 bp，共 18 组参数；PE、Momentum、ROE 分别运行，共 54 个策略成本情景。",
         "- Quarterly 使用 3/6/9/12 月现有月末信号，下一交易日开盘执行，持有至下一季度执行；共有 46 个季度信号，2025-12-31 仅为无后续执行日的末端候选。",
         "- 选股边界同分全部保留并等权，因此实际选股比例可能略高于名义比例。无法买入留现金，待卖出恢复可交易后卖出。",
@@ -519,12 +519,14 @@ def run(config: RobustnessConfig) -> RobustnessOutputs:
     outputs.costs.to_parquet(p / "robustness_stage10_costs.parquet", index=False)
     outputs.portfolio_summary.to_csv(p / "robustness_stage10_portfolio_summary.csv", index=False, encoding="utf-8-sig")
     outputs.manual_review.to_csv(p / "robustness_stage10_manual_review.csv", index=False, encoding="utf-8-sig")
-    (p.parent.parent / "reports" / "robustness_stage10.md").write_text(render_report(outputs, config), encoding="utf-8")
+    report_dir = p.parent.parent / "reports" / "generated"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "robustness.md").write_text(render_report(outputs, config), encoding="utf-8")
     return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Run Stage 10 robustness tests.")
+    parser = argparse.ArgumentParser(description="Run the robustness tests.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_robustness_config(args.config))

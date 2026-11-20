@@ -1,4 +1,4 @@
-"""Generate the Stage 11 research figures from frozen Stage 4-10 outputs."""
+"""Generate the research figures from the saved pipeline outputs."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def load_visualization_config(config_path: Path) -> VisualizationConfig:
     return VisualizationConfig(
         processed_dir=root / settings["data"]["processed_dir"],
         figure_dir=root / "reports" / "figures",
-        index_path=root / "reports" / "stage11_figure_index.md",
+        index_path=root / "reports" / "generated" / "figures.md",
     )
 
 
@@ -518,8 +518,8 @@ def build_figure_index() -> str:
         ("13_robustness_roe.png", "ROE 净累计收益对参数是否敏感？", "同 11，factor=roe", "net 0/10/20 bp", "2014-10-08—2025-12-31", "边界同分全部保留；不选择最佳参数。"),
     ]
     lines = [
-        "# 阶段 11：研究图表索引", "",
-        "本索引只记录阶段 11 图表。图表读取阶段 4～10 已固化产物，不改写收益、成本、回撤或稳健性规则。", "",
+        "# 研究图表索引", "",
+        "图表读取管线已固化的产物，不改写收益、成本、回撤或稳健性规则。", "",
         "## 统一视觉与口径", "",
         "- Matplotlib 白底；PE `#0072B2`、Momentum `#E69F00`、ROE `#009E73`、H00300 `#4D4D4D`。",
         "- gross 使用实线；net 0/10/20 bp 分别使用由浅到深颜色及 `--` / `-.` / `:` 线型。",
@@ -567,6 +567,7 @@ def run(config: VisualizationConfig) -> tuple[Path, ...]:
     plot_robustness(inputs, "pe", config.figure_dir / FIGURE_FILES[14])
     plot_robustness(inputs, "momentum", config.figure_dir / FIGURE_FILES[15])
     plot_robustness(inputs, "roe", config.figure_dir / FIGURE_FILES[16])
+    config.index_path.parent.mkdir(parents=True, exist_ok=True)
     config.index_path.write_text(build_figure_index(), encoding="utf-8")
     outputs = tuple(config.figure_dir / name for name in FIGURE_FILES)
     missing = [str(path) for path in outputs if not path.exists() or path.stat().st_size == 0]
@@ -576,7 +577,7 @@ def run(config: VisualizationConfig) -> tuple[Path, ...]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Generate Stage 11 research figures.")
+    parser = argparse.ArgumentParser(description="Generate the research figures.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_visualization_config(args.config))

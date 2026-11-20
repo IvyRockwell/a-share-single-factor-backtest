@@ -1,4 +1,4 @@
-"""Stage 2 CSMAR cleaning pipeline.
+"""CSMAR data cleaning pipeline.
 
 The pipeline treats ``项目初始数据`` as read-only.  It preserves source values,
 adds normalized fields and explicit quality flags, and writes only to
@@ -340,7 +340,7 @@ def run_pipeline(config: PipelineConfig) -> dict:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Build standardized Stage 2 CSMAR datasets.")
+    parser = argparse.ArgumentParser(description="Build the standardized CSMAR datasets.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     summary = run_pipeline(load_config(args.config))

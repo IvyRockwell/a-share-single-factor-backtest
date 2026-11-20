@@ -1,4 +1,4 @@
-"""Build the Stage 3 point-in-time historical A-share investment universe."""
+"""Build the point-in-time historical A-share investment universe."""
 
 from __future__ import annotations
 
@@ -191,7 +191,7 @@ def render_report(outputs: UniverseOutputs, daily_trading: pd.DataFrame, status_
     sample = _audit_sample(outputs, daily_trading, status_changes)
     reason_counts = outputs.exclusions["exclusion_reasons"].str.split("\\|").explode().value_counts().sort_index()
     lines = [
-        "# 阶段 3：历史股票池", "", "## 生成范围与口径", "",
+        "# 历史股票池", "", "## 生成范围与口径", "",
         f"- 信号日：候选市场 `{', '.join(sorted(config.markets))}` 的交易日历 `State=O` 中每月最后一个交易日，共 {len(outputs.signal_dates)} 期（{outputs.signal_dates.min():%Y-%m-%d} 至 {outputs.signal_dates.max():%Y-%m-%d}）。",
         f"- 纳入条件：调仓日有日交易记录、`Trdsta={config.normal_trading_status}`、首次上市满 {config.min_listing_months} 个自然月，且未处于截至该日已生效的暂停上市、退市整理期或终止上市状态。",
         "- 状态只按 `ChangeDate`（标准字段 `event_date`）在信号日或之前生效；未来状态不倒推。`600200`（2025-12-10 至 2025-12-29）与 `600701`（2021-03-15 至 2021-04-26）的已审计冲突区间作为数据质量例外排除。",
@@ -241,13 +241,14 @@ def run(config: UniverseConfig) -> UniverseOutputs:
     outputs.period_summary.to_csv(directory / "universe_period_summary.csv", index=False, encoding="utf-8-sig")
     outputs.exclusions.to_parquet(directory / "universe_exclusions.parquet", index=False)
     audit_daily = pd.read_parquet(directory / "daily_trading.parquet", columns=["stock_code", "trade_date"])
-    report_path = directory.parent.parent / "reports" / "historical_universe_stage3.md"
-    report_path.write_text(render_report(outputs, audit_daily, status, config), encoding="utf-8")
+    report_dir = directory.parent.parent / "reports" / "generated"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "universe.md").write_text(render_report(outputs, audit_daily, status, config), encoding="utf-8")
     return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Build the Stage 3 historical investment universe.")
+    parser = argparse.ArgumentParser(description="Build the historical investment universe.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_universe_config(args.config))

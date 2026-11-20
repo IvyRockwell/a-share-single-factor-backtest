@@ -1,4 +1,4 @@
-"""Run the Stage 8 transaction-cost analysis from Stage 7 actual fills."""
+"""Apply commission, stamp duty, and slippage to the actual fills."""
 
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ def validate_outputs(outputs: CostOutputs) -> None:
 
 
 def render_report(outputs: CostOutputs, config: CostConfig) -> str:
-    lines = ["# 阶段 8：交易成本", "", "## 成本口径", "", "- 成本只对阶段 7 调仓记录中状态为 `executed` 或 `partially_filled_cash_constrained` 且实际开盘成交金额大于 0 的逐笔记录计提；不按目标权重重建成交。", f"- 佣金：买卖双边各 {config.commission_rate * 10_000:.0f} bp；不计最低佣金。", "- 印花税：仅卖出，2014-01-01 至 2023-08-27 为 10 bp，2023-08-28 起为 5 bp。", "- 滑点：买卖双边各 0 bp、10 bp、20 bp；因此 0 bp 情景仍包含佣金与印花税。", "- 换手率 = 当日实际买入金额与实际卖出金额之和 ÷ 前一交易日阶段 7 毛净值；首日分母为 1。", "", "## 参数来源", "", "- 印花税历史规则：[财政部 2008 年单边征收公告](https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/200809/t20080919_76432.htm)；[财政部、税务总局 2023 年减半公告](https://shanxi.chinatax.gov.cn/web/detail/sx-11400-545-1780448)。", "- 佣金 3 bp 与滑点情景均为本研究确认的假设；非特定券商实际费率。", "", "## 情景结果", "", "| 因子 | 滑点情景 | 期末毛净值 | 期末净值 | 累计毛收益 | 累计净收益 | 成本合计 |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    lines = ["# 交易成本", "", "## 成本口径", "", "- 成本只对阶段 7 调仓记录中状态为 `executed` 或 `partially_filled_cash_constrained` 且实际开盘成交金额大于 0 的逐笔记录计提；不按目标权重重建成交。", f"- 佣金：买卖双边各 {config.commission_rate * 10_000:.0f} bp；不计最低佣金。", "- 印花税：仅卖出，2014-01-01 至 2023-08-27 为 10 bp，2023-08-28 起为 5 bp。", "- 滑点：买卖双边各 0 bp、10 bp、20 bp；因此 0 bp 情景仍包含佣金与印花税。", "- 换手率 = 当日实际买入金额与实际卖出金额之和 ÷ 前一交易日阶段 7 毛净值；首日分母为 1。", "", "## 参数来源", "", "- 印花税历史规则：[财政部 2008 年单边征收公告](https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/200809/t20080919_76432.htm)；[财政部、税务总局 2023 年减半公告](https://shanxi.chinatax.gov.cn/web/detail/sx-11400-545-1780448)。", "- 佣金 3 bp 与滑点情景均为本研究确认的假设；非特定券商实际费率。", "", "## 情景结果", "", "| 因子 | 滑点情景 | 期末毛净值 | 期末净值 | 累计毛收益 | 累计净收益 | 成本合计 |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
     latest = outputs.daily.sort_values("trade_date").groupby(["factor", "slippage_bp"], as_index=False).tail(1)
     cost_totals = outputs.costs.groupby(["factor", "slippage_bp"], as_index=False)["total_transaction_cost"].sum().rename(columns={"total_transaction_cost": "cumulative_transaction_cost"})
     for row in latest.merge(cost_totals, on=["factor", "slippage_bp"]).sort_values(["factor", "slippage_bp"]).itertuples(index=False):
@@ -166,12 +166,14 @@ def run(config: CostConfig) -> CostOutputs:
     outputs.costs.to_parquet(p / "backtest_stage8_costs.parquet", index=False)
     outputs.daily.to_parquet(p / "backtest_stage8_daily_returns.parquet", index=False)
     outputs.monthly.to_csv(p / "backtest_stage8_monthly_returns.csv", index=False, encoding="utf-8-sig")
-    (p.parent.parent / "reports" / "backtest_stage8.md").write_text(render_report(outputs, config), encoding="utf-8")
+    report_dir = p.parent.parent / "reports" / "generated"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "costs.md").write_text(render_report(outputs, config), encoding="utf-8")
     return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Run Stage 8 transaction-cost analysis.")
+    parser = argparse.ArgumentParser(description="Run the transaction-cost analysis.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_cost_config(args.config))

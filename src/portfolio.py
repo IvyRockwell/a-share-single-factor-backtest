@@ -1,4 +1,4 @@
-"""Build Stage 6 single-factor target portfolios and execution audits."""
+"""Build single-factor target portfolios and execution audits."""
 
 from __future__ import annotations
 
@@ -223,7 +223,7 @@ def render_report(outputs: PortfolioOutputs, config: PortfolioConfig) -> str:
     summary = outputs.period_summary
     sample = outputs.targets.sample(n=min(8, len(outputs.targets)), random_state=20260916).sort_values(["factor", "signal_date", "stock_code"])
     lines = [
-        "# 阶段 6：单因子目标组合与执行审计", "", "## 固定规则", "",
+        "# 单因子目标组合与执行审计", "", "## 固定规则", "",
         f"- 每个因子独立在每个信号日从可排名股票中选择 Top {config.selection_quantile:.0%}；边界同分全部保留，不按股票代码拆分。",
         "- 目标持仓等权，目标权重在每个因子和信号日严格加总为 1。",
         "- 执行日为信号日后的首个市场交易日，执行价格口径为开盘；可执行需有该日交易记录、`trading_status=1` 且开盘价有效。",
@@ -251,12 +251,14 @@ def run(config: PortfolioConfig) -> PortfolioOutputs:
     outputs.targets.to_parquet(directory / "portfolio_targets.parquet", index=False)
     outputs.actions.to_parquet(directory / "portfolio_rebalance_actions.parquet", index=False)
     outputs.period_summary.to_csv(directory / "portfolio_period_summary.csv", index=False, encoding="utf-8-sig")
-    (directory.parent.parent / "reports" / "portfolio_stage6.md").write_text(render_report(outputs, config), encoding="utf-8")
+    report_dir = directory.parent.parent / "reports" / "generated"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "portfolio.md").write_text(render_report(outputs, config), encoding="utf-8")
     return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Build Stage 6 single-factor target portfolios.")
+    parser = argparse.ArgumentParser(description="Build the single-factor target portfolios.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_portfolio_config(args.config))

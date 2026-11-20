@@ -1,4 +1,4 @@
-"""Run the Stage 9 risk-return evaluation from Stage 7/8 outputs."""
+"""Risk-return evaluation over the gross and net daily series."""
 
 from __future__ import annotations
 
@@ -344,7 +344,7 @@ def _format_value(value: float, digits: int = 6) -> str:
 
 def render_report(outputs: PerformanceOutputs, config: PerformanceConfig) -> str:
     lines = [
-        "# 阶段 9：风险收益评价",
+        "# 风险收益评价",
         "",
         "## 评价口径",
         "",
@@ -418,12 +418,14 @@ def run(config: PerformanceConfig) -> PerformanceOutputs:
     outputs.metrics.to_csv(p / "performance_metrics.csv", index=False, encoding="utf-8-sig")
     outputs.monthly.to_csv(p / "performance_monthly_returns.csv", index=False, encoding="utf-8-sig")
     outputs.drawdowns.to_parquet(p / "performance_drawdowns.parquet", index=False)
-    (p.parent.parent / "reports" / "performance_stage9.md").write_text(render_report(outputs, config), encoding="utf-8")
+    report_dir = p.parent.parent / "reports" / "generated"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "performance.md").write_text(render_report(outputs, config), encoding="utf-8")
     return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Run Stage 9 risk-return evaluation.")
+    parser = argparse.ArgumentParser(description="Run the risk-return evaluation.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_performance_config(args.config))

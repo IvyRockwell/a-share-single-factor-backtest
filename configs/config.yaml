@@ -1,5 +1,5 @@
-# A 股单因子选股与回测研究系统基础配置
-# 全部研究假设均已确认，取值与来源见各配置项。
+# A 股单因子选股与回测研究系统配置
+# 全部研究假设与参数来源。
 
 project:
   name: A-Share Single-Factor Stock Selection & Backtesting System
@@ -50,9 +50,9 @@ universe:
   normal_trading_status: "1"
 
 costs:
-  # 已确认的阶段 8 研究假设。所有比例均按单边实际成交金额计算。
+  # 成本假设。所有比例均按单边实际成交金额计算。
   commission_rate: 0.0003
-  commission_source: confirmed_research_assumption
+  commission_source: research_assumption
   minimum_commission: null
   stamp_duty_rates:
     - start_date: 2014-01-01
@@ -61,7 +61,7 @@ costs:
       sell_rate: 0.0005
   stamp_duty_source: https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/200809/t20080919_76432.htm; https://shanxi.chinatax.gov.cn/web/detail/sx-11400-545-1780448
   slippage_scenarios_bp: [0, 10, 20]
-  slippage_source: confirmed_research_assumption
+  slippage_source: research_assumption
 
 research:
   annualization_days: 252

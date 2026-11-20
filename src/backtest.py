@@ -1,4 +1,4 @@
-"""Run the Stage 7 gross-return historical backtest."""
+"""Run the gross-return historical backtest."""
 
 from __future__ import annotations
 
@@ -261,7 +261,7 @@ def validate_outputs(outputs: BacktestOutputs) -> None:
 
 def render_report(outputs: BacktestOutputs) -> str:
     daily, monthly, records = outputs.daily, outputs.monthly, outputs.rebalance_records
-    lines = ["# 阶段 7：历史回测", "", "## 固定规则", "", "- 初始净值为 1，现金收益为 0；不计交易成本、融资、整手约束、Sharpe 或稳健性测试。", "- 每个执行日按开盘前组合净值把当期目标组合恢复为等权：先完全退出和超配减仓，再新建和低配加仓。", "- 可执行买单在现金不足时同比例缩放；新建和继续持仓调权失败不跨日追单，只有完全退出失败进入待卖并逐日重试。", "- 开盘交易后的剩余或新增持仓按 `close_price / open_price - 1` 计当日价格收益；未在当日开盘交易的整日持仓使用 `Dretwd`。", "", "## 结果汇总", "", "| 因子 | 起始日 | 结束日 | 期末净值 | 累计毛收益 | 月度记录数 |", "| --- | --- | --- | ---: | ---: | ---: |"]
+    lines = ["# 历史回测", "", "## 固定规则", "", "- 初始净值为 1，现金收益为 0；不计交易成本、融资、整手约束、Sharpe 或稳健性测试。", "- 每个执行日按开盘前组合净值把当期目标组合恢复为等权：先完全退出和超配减仓，再新建和低配加仓。", "- 可执行买单在现金不足时同比例缩放；新建和继续持仓调权失败不跨日追单，只有完全退出失败进入待卖并逐日重试。", "- 开盘交易后的剩余或新增持仓按 `close_price / open_price - 1` 计当日价格收益；未在当日开盘交易的整日持仓使用 `Dretwd`。", "", "## 结果汇总", "", "| 因子 | 起始日 | 结束日 | 期末净值 | 累计毛收益 | 月度记录数 |", "| --- | --- | --- | ---: | ---: | ---: |"]
     for factor, item in daily.groupby("factor", sort=True): lines.append(f"| {factor} | {item.trade_date.min():%Y-%m-%d} | {item.trade_date.max():%Y-%m-%d} | {item.nav.iloc[-1]:.6f} | {item.nav.iloc[-1] - 1:.6f} | {len(monthly.loc[monthly.factor.eq(factor)])} |")
     last = daily.loc[daily.factor.eq("pe")].iloc[-1]
     lines.extend(["", f"- H00300 同期净值：{last.benchmark_nav:.6f}；累计收益 {last.benchmark_nav - 1:.6f}。", f"- 冻结估值持仓日：{int(daily.frozen_valuation_count.sum()):,}；期末待卖出持仓：{int(daily.loc[daily.trade_date.eq(last.trade_date), 'pending_sale_count'].sum()):,}。", "", "## 固定抽样复核", "", "| 因子 | 日期 | 股票 | 调仓原因 | 状态 | 请求开盘金额 | 实际开盘金额 |", "| --- | --- | --- | --- | --- | ---: | ---: |"])
@@ -275,12 +275,14 @@ def run(config: BacktestConfig) -> BacktestOutputs:
     outputs = build_backtest_outputs(pd.read_parquet(p / "portfolio_targets.parquet"), pd.read_parquet(p / "portfolio_rebalance_actions.parquet"), pd.read_parquet(p / "daily_trading.parquet", columns=["stock_code", "trade_date", "open_price", "close_price", "total_return", "PreClosePrice", "trading_status", "quality_flags"]), pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"]), config)
     validate_outputs(outputs)
     outputs.daily.to_parquet(p / "backtest_daily_returns.parquet", index=False); outputs.monthly.to_csv(p / "backtest_monthly_returns.csv", index=False, encoding="utf-8-sig"); outputs.holdings.to_parquet(p / "backtest_holdings.parquet", index=False); outputs.rebalance_records.to_parquet(p / "backtest_rebalance_records.parquet", index=False)
-    (p.parent.parent / "reports" / "backtest_stage7.md").write_text(render_report(outputs), encoding="utf-8")
+    report_dir = p.parent.parent / "reports" / "generated"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "backtest.md").write_text(render_report(outputs), encoding="utf-8")
     return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Run Stage 7 gross-return backtest."); parser.add_argument("--config", type=Path, default=Path("configs/config.yaml")); args = parser.parse_args(argv)
+    parser = argparse.ArgumentParser(description="Run the gross-return backtest."); parser.add_argument("--config", type=Path, default=Path("configs/config.yaml")); args = parser.parse_args(argv)
     outputs = run(load_backtest_config(args.config)); print(f"Built {len(outputs.daily):,} daily rows and {len(outputs.holdings):,} holding snapshots.")
 
 

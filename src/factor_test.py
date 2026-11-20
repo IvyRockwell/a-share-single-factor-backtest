@@ -1,4 +1,4 @@
-"""Test Stage 4 factors with forward returns, quantiles, and Rank IC."""
+"""Test factors with forward returns, quantiles, and Rank IC."""
 
 from __future__ import annotations
 
@@ -258,7 +258,7 @@ def validate_outputs(outputs: FactorTestOutputs, quantile_groups: int, min_ic_pa
 
 
 def render_report(outputs: FactorTestOutputs) -> str:
-    lines = ["# 阶段 5：因子有效性检验", "", "本报告检验因子分数对下一月收益的区分能力，不代表实际开盘成交后的策略收益。规则详见 `reports/stage5_research_plan.md`。", "", "## 汇总", "", "| 因子 | 可检验股票记录 | 有效 IC 期数 | IC 均值 | IC 胜率 | 首日缺失 | 提前退出/数据截断 | 极端收益股票 | 空组 |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    lines = ["# 因子有效性检验", "", "本报告检验因子分数对下一月收益的区分能力，不代表实际开盘成交后的策略收益。", "", "## 汇总", "", "| 因子 | 可检验股票记录 | 有效 IC 期数 | IC 均值 | IC 胜率 | 首日缺失 | 提前退出/数据截断 | 极端收益股票 | 空组 |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for row in outputs.summary.itertuples(index=False):
         mean = "—" if pd.isna(row.ic_mean) else f"{row.ic_mean:.4f}"
         win = "—" if pd.isna(row.ic_win_rate) else f"{row.ic_win_rate:.4f}"
@@ -287,12 +287,14 @@ def run(config: FactorTestConfig) -> FactorTestOutputs:
     quantile_returns.to_csv(directory / "factor_quantile_returns.csv", index=False, encoding="utf-8-sig")
     ic_series.to_csv(directory / "factor_ic_series.csv", index=False, encoding="utf-8-sig")
     summary.to_csv(directory / "factor_test_summary.csv", index=False, encoding="utf-8-sig")
-    (directory.parent.parent / "reports" / "factor_effectiveness_stage5.md").write_text(render_report(outputs), encoding="utf-8")
+    report_dir = directory.parent.parent / "reports" / "generated"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "factor-test.md").write_text(render_report(outputs), encoding="utf-8")
     return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Run Stage 5 factor effectiveness tests.")
+    parser = argparse.ArgumentParser(description="Run the factor effectiveness tests.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_factor_test_config(args.config))
