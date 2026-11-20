@@ -306,6 +306,39 @@ def _mean_ir_t(values: pd.Series) -> tuple[float | pd.NA, float | pd.NA, float |
     return mean, ratio, ratio * np.sqrt(len(clean)), newey_west_t(clean)
 
 
+def build_pe_source_comparison(factor_details: pd.DataFrame, forward_returns: pd.DataFrame,
+                               min_pairs: int) -> pd.DataFrame:
+    """Rank IC of the rebuilt PE and of the vendor field, side by side."""
+    frame = factor_details[["signal_date", "stock_code", "pe_pit", "pe_ttm"]].merge(
+        forward_returns[["signal_date", "stock_code", "forward_return", "forward_eligible"]],
+        on=["signal_date", "stock_code"], how="inner", validate="one_to_one",
+    )
+    frame = frame.loc[frame["forward_eligible"].fillna(False)]
+    rows = []
+    for signal_date, group in frame.groupby("signal_date", sort=True):
+        row = {"signal_date": signal_date}
+        for label, column in (("pit", "pe_pit"), ("vendor", "pe_ttm")):
+            usable = group.loc[group[column].gt(0)].dropna(subset=["forward_return"])
+            row[f"{label}_count"] = len(usable)
+            # Negated so that a positive IC means "lower PE predicts higher return",
+            # matching the direction of the ranked factor score.
+            row[f"{label}_ic"] = (
+                -float(usable[column].corr(usable["forward_return"], method="spearman"))
+                if len(usable) >= min_pairs else np.nan
+            )
+        rows.append(row)
+    result = pd.DataFrame(rows)
+    result["ic_gap"] = result["vendor_ic"] - result["pit_ic"]
+    return result
+
+
+def attach_pit_check(result: pd.DataFrame, check: pd.DataFrame) -> pd.DataFrame:
+    """Label each period by whether the vendor field ran ahead of disclosure."""
+    merged = result.merge(check[["signal_date", "share_within_1pct"]], on="signal_date", how="left")
+    merged["vendor_ahead_of_disclosure"] = merged["share_within_1pct"].lt(0.5)
+    return merged
+
+
 def build_summary(details: pd.DataFrame, quantile_returns: pd.DataFrame, ic_series: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for (factor, score_type), item in details.groupby(["factor", "score_type"], sort=True):
@@ -442,6 +475,15 @@ def run(config: FactorTestConfig) -> FactorTestOutputs:
     details = pd.concat(frames, ignore_index=True)
     members, quantile_returns = build_quantile_returns(details, config.quantile_groups)
     ic_series = build_ic_series(details, config.min_ic_pairs)
+    comparison = build_pe_source_comparison(factor_details, forward, config.min_ic_pairs)
+    check_path = directory / "pe_pit_check.csv"
+    if check_path.exists():
+        comparison = attach_pit_check(comparison, pd.read_csv(check_path, parse_dates=["signal_date"]))
+        ahead = comparison.loc[comparison["vendor_ahead_of_disclosure"]]
+        matched = comparison.loc[~comparison["vendor_ahead_of_disclosure"]]
+        print(f"PE source: vendor ahead in {len(ahead)} months (vendor IC {ahead['vendor_ic'].mean():.4f} "
+              f"vs rebuilt {ahead['pit_ic'].mean():.4f}); matched in {len(matched)} months "
+              f"({matched['vendor_ic'].mean():.4f} vs {matched['pit_ic'].mean():.4f}).")
     summary = build_summary(details, quantile_returns, ic_series)
     subperiods = build_subperiod_table(quantile_returns, ic_series, config.subperiods)
     outputs = FactorTestOutputs(forward, details, members, quantile_returns, ic_series, summary, subperiods)
@@ -454,6 +496,7 @@ def run(config: FactorTestConfig) -> FactorTestOutputs:
     summary.to_csv(directory / "factor_test_summary.csv", index=False, encoding="utf-8-sig")
     if not subperiods.empty:
         subperiods.to_csv(directory / "factor_subperiods.csv", index=False, encoding="utf-8-sig")
+    comparison.to_csv(directory / "pe_source_comparison.csv", index=False, encoding="utf-8-sig")
     report_dir = directory.parent.parent / "reports" / "generated"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "factor-test.md").write_text(render_report(outputs), encoding="utf-8")

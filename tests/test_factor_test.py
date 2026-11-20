@@ -182,3 +182,50 @@ def test_summary_reports_newey_west_columns() -> None:
     assert {"ic_t_nw", "spread_t_nw", "nw_lags"} <= set(summary.columns)
     assert pd.notna(row["ic_t_nw"]) and pd.notna(row["spread_t_nw"])
     assert row["nw_lags"] >= 1
+
+def test_pe_source_comparison_negates_so_low_pe_is_positive() -> None:
+    from src.factor_test import build_pe_source_comparison
+
+    dates = pd.to_datetime(["2021-01-31", "2021-02-28"])
+    codes = ["000001", "000002", "000003", "000004"]
+    factor_details = pd.DataFrame({
+        "signal_date": dates.repeat(4),
+        "stock_code": codes * 2,
+        "pe_pit": [1.0, 2.0, 3.0, 4.0] * 2,
+        "pe_ttm": [1.0, 2.0, 3.0, 4.0] * 2,
+    })
+    forward_returns = pd.DataFrame({
+        "signal_date": dates.repeat(4),
+        "stock_code": codes * 2,
+        "forward_return": [0.04, 0.03, 0.02, 0.01] * 2,
+        "forward_eligible": True,
+    })
+
+    comparison = build_pe_source_comparison(factor_details, forward_returns, min_pairs=3)
+
+    assert comparison["pit_ic"].tolist() == pytest.approx([1.0, 1.0])
+    assert comparison["vendor_ic"].tolist() == pytest.approx([1.0, 1.0])
+    assert comparison["ic_gap"].abs().max() < 1e-12
+
+
+def test_pe_source_comparison_skips_thin_cross_sections() -> None:
+    from src.factor_test import build_pe_source_comparison
+
+    dates = pd.to_datetime(["2021-01-31"])
+    factor_details = pd.DataFrame({
+        "signal_date": dates, "stock_code": ["000001"], "pe_pit": [5.0], "pe_ttm": [5.0],
+    })
+    forward_returns = pd.DataFrame({
+        "signal_date": dates, "stock_code": ["000001"], "forward_return": [0.02], "forward_eligible": True,
+    })
+    comparison = build_pe_source_comparison(factor_details, forward_returns, min_pairs=50)
+    assert pd.isna(comparison["pit_ic"].iloc[0])
+
+
+def test_attach_pit_check_labels_the_look_ahead_months() -> None:
+    from src.factor_test import attach_pit_check
+
+    comparison = pd.DataFrame({"signal_date": pd.to_datetime(["2021-01-31", "2021-06-30"]), "pit_ic": [0.01, 0.02]})
+    check = pd.DataFrame({"signal_date": pd.to_datetime(["2021-01-31", "2021-06-30"]), "share_within_1pct": [0.05, 1.0]})
+    merged = attach_pit_check(comparison, check)
+    assert merged["vendor_ahead_of_disclosure"].tolist() == [True, False]
