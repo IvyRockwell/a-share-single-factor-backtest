@@ -48,7 +48,7 @@ def test_q5_minus_q1_rejects_an_incorrect_cumulative_rule() -> None:
 
 
 def test_figure_manifest_and_index_cover_every_requested_chart() -> None:
-    assert len(FIGURE_FILES) == 17
+    assert len(FIGURE_FILES) == 18
     assert len(set(FIGURE_FILES)) == len(FIGURE_FILES)
     index = build_figure_index()
     for filename in FIGURE_FILES:

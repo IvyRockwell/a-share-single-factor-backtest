@@ -42,6 +42,7 @@ FIGURE_FILES = (
     "11_robustness_pe.png",
     "12_robustness_momentum.png",
     "13_robustness_roe.png",
+    "14_neutralization_ic.png",
 )
 
 
@@ -57,6 +58,8 @@ class FigureInputs:
     quality: pd.DataFrame
     quantiles: pd.DataFrame
     ic: pd.DataFrame
+    ic_all: pd.DataFrame
+    factor_summary: pd.DataFrame
     gross_daily: pd.DataFrame
     cost_daily: pd.DataFrame
     metrics: pd.DataFrame
@@ -87,10 +90,19 @@ def load_inputs(processed_dir: Path) -> FigureInputs:
     def read_csv(name: str) -> pd.DataFrame:
         return pd.read_csv(processed_dir / name, parse_dates=parse_csv_dates.get(name))
 
+    quantiles = read_csv("factor_quantile_returns.csv")
+    ic = read_csv("factor_ic_series.csv")
+    if "score_type" in quantiles.columns:
+        quantiles = quantiles.loc[quantiles["score_type"].eq("raw")].reset_index(drop=True)
+    if "score_type" in ic.columns:
+        ic = ic.loc[ic["score_type"].eq("raw")].reset_index(drop=True)
+
     return FigureInputs(
         quality=read_csv("factor_period_quality.csv"),
-        quantiles=read_csv("factor_quantile_returns.csv"),
-        ic=read_csv("factor_ic_series.csv"),
+        quantiles=quantiles,
+        ic=ic,
+        ic_all=read_csv("factor_ic_series.csv"),
+        factor_summary=read_csv("factor_test_summary.csv"),
         gross_daily=pd.read_parquet(processed_dir / "backtest_daily_returns.parquet"),
         cost_daily=pd.read_parquet(processed_dir / "backtest_net_daily_returns.parquet"),
         metrics=read_csv("performance_metrics.csv"),
@@ -298,13 +310,17 @@ def plot_gross_nav(inputs: FigureInputs, output: Path) -> None:
         ax.plot(item["trade_date"], item["nav"], color=FACTOR_COLORS[factor], lw=2.0, label=f"{FACTOR_LABELS[factor]} gross")
     benchmark = inputs.gross_daily.loc[inputs.gross_daily["factor"].eq("pe")].sort_values("trade_date")
     ax.plot(benchmark["trade_date"], benchmark["benchmark_nav"], color=BENCHMARK_COLOR, lw=2.1, label="H00300 全收益")
-    ax.set_title("三因子策略毛净值与 H00300 全收益指数")
+    if "ew_benchmark_return" in benchmark.columns:
+        equal_weight = (1 + benchmark["ew_benchmark_return"].fillna(0.0)).cumprod()
+        ax.plot(benchmark["trade_date"], equal_weight, color=BENCHMARK_COLOR, lw=1.6, linestyle="--",
+                label="等权全 A")
+    ax.set_title("三因子策略毛净值与基准")
     ax.set_ylabel("净值（初始值 = 1）")
     ax.set_xlabel("交易日")
     ax.set_ylim(bottom=0)
     _date_axis(ax)
     ax.legend(ncol=4, loc="upper left", frameon=False)
-    _footer(fig, "来源：backtest_daily_returns.parquet｜2014-10-08—2025-12-31｜策略：gross、未扣成本；H00300：全收益｜执行日策略从开盘开始，基准为完整日收益，盘中起点不完全一致")
+    _footer(fig, "来源：backtest_daily_returns.parquet｜2014-10-08—2025-12-31｜策略：gross、未扣成本；H00300 与等权全 A 为全收益口径｜执行日策略从开盘开始，基准为完整日收益")
     fig.tight_layout(rect=(0, 0.06, 1, 1))
     _save(fig, output)
 
@@ -335,7 +351,9 @@ def plot_gross_vs_net(inputs: FigureInputs, output: Path) -> None:
 
 def plot_drawdowns(inputs: FigureInputs, output: Path) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(13, 9.5), sharex=True)
-    benchmark = inputs.drawdowns.loc[inputs.drawdowns["series_type"].eq("benchmark")].sort_values("trade_date")
+    benchmark = inputs.drawdowns.loc[
+        inputs.drawdowns["series_type"].eq("benchmark") & inputs.drawdowns["factor"].eq("H00300")
+    ].sort_values("trade_date")
     for ax, factor in zip(axes, FACTORS):
         gross = inputs.drawdowns.loc[
             inputs.drawdowns["series_type"].eq("gross") & inputs.drawdowns["factor"].eq(factor)
@@ -401,8 +419,43 @@ def plot_monthly_returns(inputs: FigureInputs, output: Path) -> None:
 
 def _metric_order(metrics: pd.DataFrame) -> pd.DataFrame:
     ordered_ids = [f"{factor}_{kind}" for factor in FACTORS for kind in ("gross", "net_0bp", "net_10bp", "net_20bp")]
-    ordered_ids.append("h00300_benchmark")
-    return metrics.set_index("series_id").loc[ordered_ids].reset_index()
+    ordered_ids.extend(["h00300_benchmark", "ew_all_a_benchmark", "cw_all_a_benchmark"])
+    present = [series_id for series_id in ordered_ids if series_id in set(metrics["series_id"])]
+    remaining = [series_id for series_id in metrics["series_id"] if series_id not in set(present)]
+    return metrics.set_index("series_id").loc[present + remaining].reset_index()
+
+
+def plot_neutralization(inputs: FigureInputs, output: Path) -> None:
+    """Mean Rank IC before and after neutralization, with the t statistic annotated."""
+    order = (("raw", "原始分数"), ("raw_neutral_sample", "同子样本"), ("neutral", "行业+市值中性化"))
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5.0))
+    for axis, factor in zip(axes, FACTORS):
+        labels, values, t_values = [], [], []
+        for score_type, label in order:
+            row = inputs.factor_summary.loc[
+                inputs.factor_summary["factor"].eq(factor) & inputs.factor_summary["score_type"].eq(score_type)
+            ]
+            if row.empty:
+                continue
+            labels.append(label)
+            values.append(float(row["ic_mean"].iloc[0]))
+            t_value = row["ic_t"].iloc[0]
+            t_values.append(float(t_value) if pd.notna(t_value) else np.nan)
+        positions = np.arange(len(values))
+        axis.bar(positions, values, color=FACTOR_COLORS[factor], alpha=0.85, width=0.6)
+        axis.axhline(0, color=BENCHMARK_COLOR, linewidth=0.9)
+        axis.set_xticks(positions, labels, fontsize=9)
+        axis.set_title(f"{FACTOR_LABELS[factor]} 平均 Rank IC")
+        axis.set_ylabel("IC 均值")
+        axis.grid(axis="y", alpha=0.25)
+        for position, value, t_value in zip(positions, values, t_values):
+            text = f"{value:.4f}\nt={t_value:.1f}" if np.isfinite(t_value) else f"{value:.4f}"
+            axis.annotate(text, (position, value), textcoords="offset points",
+                          xytext=(0, 6 if value >= 0 else -18), ha="center", fontsize=8)
+    fig.suptitle("中性化前后：平均 Rank IC 与 t 值", fontsize=15)
+    _footer(fig, "来源：factor_test_summary.csv｜2014-09-30—2025-11-28｜同子样本 = 在与中性化相同的样本上重算原始 IC｜IC 为月度 Spearman 相关")
+    fig.tight_layout(rect=(0, 0.05, 1, 0.92))
+    _save(fig, output)
 
 
 def plot_metric(inputs: FigureInputs, metric: str, title: str, ylabel: str, output: Path, percent: bool) -> None:
@@ -413,7 +466,7 @@ def plot_metric(inputs: FigureInputs, metric: str, title: str, ylabel: str, outp
     for row in data.itertuples(index=False):
         if row.series_type == "benchmark":
             hatches.append("")
-            labels.append("H00300")
+            labels.append(str(row.factor))
         elif row.series_type == "gross":
             hatches.append("")
             labels.append(f"{FACTOR_LABELS[row.factor]}\ngross")
@@ -436,9 +489,9 @@ def plot_metric(inputs: FigureInputs, metric: str, title: str, ylabel: str, outp
         Patch(facecolor="#FFFFFF", edgecolor="#333333", hatch="//", label="net 0 bp"),
         Patch(facecolor="#FFFFFF", edgecolor="#333333", hatch="xx", label="net 10 bp"),
         Patch(facecolor="#FFFFFF", edgecolor="#333333", hatch="..", label="net 20 bp"),
-        Patch(facecolor=BENCHMARK_COLOR, label="H00300"),
+        Patch(facecolor=BENCHMARK_COLOR, label="基准"),
     ], ncol=5, loc="lower right", bbox_to_anchor=(1.0, 1.005), frameon=False)
-    _footer(fig, "来源：performance_metrics.csv｜2014-10-08—2025-12-31｜gross 未扣成本；net 0/10/20 bp 均含佣金与印花税，另按情景加入滑点｜H00300 为全收益指数")
+    _footer(fig, "来源：performance_metrics.csv｜2014-10-08—2025-12-31｜gross 未扣成本；net 0/10/20 bp 均含佣金与印花税，另按情景加入滑点｜H00300 为全收益指数，EW/CW 为股票池等权与市值加权")
     fig.tight_layout(rect=(0, 0.07, 1, 1))
     _save(fig, output)
 
@@ -503,7 +556,7 @@ def build_figure_index() -> str:
         ("02_factor_pe.png", "PE 的五分位、Q5-Q1 与 Rank IC 如何变化？", "factor_quantile_returns.csv: quantile, cumulative_group_return, q_high_minus_q_low, cumulative_q_high_minus_q_low; factor_ic_series.csv: rank_ic", "分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "每期 Q5-Q1 只计算一次，累计值在同期五个分位行中完全一致。"),
         ("03_factor_momentum.png", "Momentum 的五分位、Q5-Q1 与 Rank IC 如何变化？", "同 02，factor=momentum", "分组未来收益，非策略 gross/net；成本不适用", "2015-03-31—2025-11-28", "前 6 个信号期无完整回看历史，因此不填造结果。"),
         ("04_factor_roe.png", "ROE 的五分位、Q5-Q1 与 Rank IC 如何变化？", "同 02，factor=roe", "分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "分组结果不代表开盘可成交策略。"),
-        ("05_gross_nav_vs_benchmark.png", "三因子毛净值相对 H00300 如何变化？", "backtest_daily_returns.parquet: trade_date, factor, nav, benchmark_nav", "策略 gross；H00300 全收益；未扣策略成本", "2014-10-08—2025-12-31", "策略执行日从开盘开始，基准使用完整日收益，盘中起点不完全一致。"),
+        ("05_gross_nav_vs_benchmark.png", "三因子毛净值相对基准如何变化？", "backtest_daily_returns.parquet: trade_date, factor, nav, benchmark_nav, ew_benchmark_return", "策略 gross；H00300 与等权全 A 全收益；未扣策略成本", "2014-10-08—2025-12-31", "策略执行日从开盘开始，基准使用完整日收益，盘中起点不完全一致。"),
         ("06_gross_vs_net.png", "交易成本情景如何改变各因子净值？", "backtest_daily_returns.parquet: nav; backtest_net_daily_returns.parquet: net_nav, slippage_bp", "gross 与 net 0/10/20 bp；0 bp 仍含佣金和印花税", "2014-10-08—2025-12-31", "最低佣金与盘口冲击未纳入；滑点为研究假设。"),
         ("07_drawdowns.png", "各毛收益策略与 H00300 的历史回撤如何比较？", "performance_drawdowns.parquet: series_type, factor, trade_date, drawdown", "策略 gross；H00300 全收益；不展示 net", "2014-10-08—2025-12-31", "策略与基准执行日盘中起点不完全一致。"),
         ("08_monthly_returns.png", "三因子毛收益策略每月表现如何？", "performance_monthly_returns.csv: series_type, factor, month, monthly_return", "仅 gross；未扣成本", "2014-10—2025-12", "统一色阶保留极端月份；缺失格显示为破折号。"),
@@ -516,6 +569,7 @@ def build_figure_index() -> str:
         ("11_robustness_pe.png", "PE 净累计收益对选股比例、调仓频率和成本是否敏感？", "robustness_metrics.csv: selection_quantile, rebalance_frequency, slippage_bp, net_cumulative_return", "net 0/10/20 bp", "2014-10-08—2025-12-31", "边界同分全部保留；不选择最佳参数。"),
         ("12_robustness_momentum.png", "Momentum 净累计收益对参数是否敏感？", "同 11，factor=momentum", "net 0/10/20 bp", "2014-10-08—2025-12-31", "部分参数下收益方向反转；不选择最佳参数。"),
         ("13_robustness_roe.png", "ROE 净累计收益对参数是否敏感？", "同 11，factor=roe", "net 0/10/20 bp", "2014-10-08—2025-12-31", "边界同分全部保留；不选择最佳参数。"),
+        ("14_neutralization_ic.png", "中性化前后平均 Rank IC 与 t 值如何变化？", "factor_test_summary.csv: score_type, ic_mean, ic_t", "分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "同子样本列用于排除样本变化的影响。"),
     ]
     lines = [
         "# 研究图表索引", "",
@@ -554,11 +608,11 @@ def run(config: VisualizationConfig) -> tuple[Path, ...]:
     plot_drawdowns(inputs, config.figure_dir / FIGURE_FILES[6])
     plot_monthly_returns(inputs, config.figure_dir / FIGURE_FILES[7])
     metric_specs = (
-        ("cumulative_return", "累计收益：gross、net 成本情景与 H00300", "累计收益", True),
-        ("annualized_return", "年化收益：gross、net 成本情景与 H00300", "年化收益", True),
-        ("annualized_volatility", "年化波动率：gross、net 成本情景与 H00300", "年化波动率", True),
-        ("max_drawdown", "最大回撤：gross、net 成本情景与 H00300", "最大回撤", True),
-        ("sharpe_ratio", "Sharpe Ratio：gross、net 成本情景与 H00300", "Sharpe Ratio", False),
+        ("cumulative_return", "累计收益：gross、net 成本情景与基准", "累计收益", True),
+        ("annualized_return", "年化收益：gross、net 成本情景与基准", "年化收益", True),
+        ("annualized_volatility", "年化波动率：gross、net 成本情景与基准", "年化波动率", True),
+        ("max_drawdown", "最大回撤：gross、net 成本情景与基准", "最大回撤", True),
+        ("sharpe_ratio", "Sharpe Ratio：gross、net 成本情景与基准", "Sharpe Ratio", False),
     )
     for spec, filename in zip(metric_specs, FIGURE_FILES[8:13]):
         metric, title, ylabel, percent = spec
@@ -567,6 +621,7 @@ def run(config: VisualizationConfig) -> tuple[Path, ...]:
     plot_robustness(inputs, "pe", config.figure_dir / FIGURE_FILES[14])
     plot_robustness(inputs, "momentum", config.figure_dir / FIGURE_FILES[15])
     plot_robustness(inputs, "roe", config.figure_dir / FIGURE_FILES[16])
+    plot_neutralization(inputs, config.figure_dir / FIGURE_FILES[17])
     config.index_path.parent.mkdir(parents=True, exist_ok=True)
     config.index_path.write_text(build_figure_index(), encoding="utf-8")
     outputs = tuple(config.figure_dir / name for name in FIGURE_FILES)
