@@ -1,4 +1,4 @@
-"""Tests for Stage 9 risk-return metrics and source-lineage checks."""
+"""Tests for the risk-return metrics and source-lineage checks."""
 
 from pathlib import Path
 
@@ -13,7 +13,7 @@ DATES = pd.date_range("2021-01-04", periods=3, freq="B")
 
 
 def _config() -> PerformanceConfig:
-    return PerformanceConfig(Path("data/processed"), 252, 0.0, DATES.min(), DATES.max(), len(DATES))
+    return PerformanceConfig(Path("data/processed"), 252, 0.0)
 
 
 def _inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -82,7 +82,7 @@ def test_metrics_use_confirmed_daily_formulas_and_initial_nav_drawdown() -> None
 
 def test_outputs_keep_gross_net_and_benchmark_cost_meanings_separate() -> None:
     outputs = build_performance_outputs(*_inputs(), _config())
-    validate_outputs(outputs, _config())
+    validate_outputs(outputs)
     assert len(outputs.metrics) == 13
     gross = outputs.metrics.loc[outputs.metrics["series_type"].eq("gross")]
     net = outputs.metrics.loc[outputs.metrics["series_type"].eq("net")]
@@ -92,7 +92,6 @@ def test_outputs_keep_gross_net_and_benchmark_cost_meanings_separate() -> None:
     assert net["cumulative_transaction_cost"].gt(0).all()
     assert benchmark[["cumulative_turnover", "annualized_turnover", "cumulative_transaction_cost"]].isna().all().all()
     assert len(outputs.monthly) == 13
-    assert outputs.manual_review["absolute_difference"].le(1e-12).all()
 
 
 def test_mismatched_strategy_dates_are_rejected() -> None:

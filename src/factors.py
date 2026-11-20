@@ -207,13 +207,6 @@ def validate_outputs(outputs: FactorOutputs, pool: pd.DataFrame) -> None:
         raise ValueError("ROE used a report disclosed on or after its signal date.")
 
 
-def _sample_rows(details: pd.DataFrame, factor: str, columns: list[str]) -> pd.DataFrame:
-    rankable = FACTOR_COLUMNS[factor][1]
-    return details.loc[details[rankable], ["signal_date", "stock_code", *columns]].sample(
-        n=min(5, int(details[rankable].sum())), random_state=20260916
-    ).sort_values(["signal_date", "stock_code"])
-
-
 def render_report(outputs: FactorOutputs) -> str:
     details, quality = outputs.details, outputs.quality
     lines = [
@@ -236,22 +229,8 @@ def render_report(outputs: FactorOutputs) -> str:
     pe = quality.loc[quality["factor"].eq("pe")]
     lines.extend([
         "", f"正值 PE 未截尾或删除；各期 99 分位数的最大值为 `{pe['positive_pe_p99'].max():.6g}`，各期最大值中的最大值为 `{pe['positive_pe_max'].max():.6g}`。",
-        "完整的逐期极端值统计已写入 `data/processed/factor_period_quality.csv`。", "", "## 固定抽样复核", "",
+        "完整的逐期极端值统计已写入 `data/processed/factor_period_quality.csv`。", "",
     ])
-    samples = {
-        "pe": ["pe_ttm", "pe_rank", "pe_score"],
-        "momentum": ["momentum_target_date", "momentum_start_date", "momentum_start_adjusted_close", "momentum_signal_adjusted_close", "momentum_6m_return", "momentum_rank", "momentum_score"],
-        "roe": ["roe_report_date", "roe_actual_disclosure_date", "net_profit", "shareholder_equity", "roe", "roe_rank", "roe_score"],
-    }
-    for factor, columns in samples.items():
-        lines.extend([f"### {factor}", "", "| " + " | ".join(["信号日", "股票", *columns]) + " |", "| " + " | ".join(["---"] * (2 + len(columns))) + " |"])
-        for row in _sample_rows(details, factor, columns).itertuples(index=False):
-            values = []
-            for column in ["signal_date", "stock_code", *columns]:
-                value = getattr(row, column)
-                values.append("—" if pd.isna(value) else (pd.Timestamp(value).strftime("%Y-%m-%d") if "date" in column else str(value)))
-            lines.append("| " + " | ".join(values) + " |")
-        lines.append("")
     return "\n".join(lines)
 
 

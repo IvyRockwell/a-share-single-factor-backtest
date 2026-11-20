@@ -81,7 +81,7 @@ def _performance_outputs() -> PerformanceOutputs:
                 "sharpe_ratio": 0.45, "cumulative_turnover": 1.0,
                 "annualized_turnover": 84.0, "cumulative_transaction_cost": 0.001 + scenario / 10_000,
             })
-    return PerformanceOutputs(pd.DataFrame(rows), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    return PerformanceOutputs(pd.DataFrame(rows), pd.DataFrame(), pd.DataFrame())
 
 
 def test_metrics_table_has_each_factor_cost_scenario_and_separate_gross_net_fields() -> None:

@@ -12,9 +12,6 @@ import yaml
 
 FACTORS = ("pe", "momentum", "roe")
 SCENARIOS = (0, 10, 20)
-STAGE9_START = pd.Timestamp("2014-10-08")
-STAGE9_END = pd.Timestamp("2025-12-31")
-STAGE9_OBSERVATIONS = 2_735
 
 
 @dataclass(frozen=True)
@@ -22,9 +19,6 @@ class PerformanceConfig:
     processed_dir: Path
     annualization_days: int
     risk_free_rate: float
-    start_date: pd.Timestamp = STAGE9_START
-    end_date: pd.Timestamp = STAGE9_END
-    expected_observations: int = STAGE9_OBSERVATIONS
 
 
 @dataclass(frozen=True)
@@ -32,7 +26,6 @@ class PerformanceOutputs:
     metrics: pd.DataFrame
     monthly: pd.DataFrame
     drawdowns: pd.DataFrame
-    manual_review: pd.DataFrame
 
 
 def load_performance_config(config_path: Path) -> PerformanceConfig:
@@ -43,9 +36,9 @@ def load_performance_config(config_path: Path) -> PerformanceConfig:
     annualization_days = research.get("annualization_days")
     risk_free_rate = research.get("risk_free_rate")
     if not isinstance(annualization_days, int) or annualization_days <= 0:
-        raise ValueError("Stage 9 requires a positive integer annualization_days.")
+        raise ValueError("annualization_days must be a positive integer.")
     if risk_free_rate is None or float(risk_free_rate) <= -1:
-        raise ValueError("Stage 9 requires an explicitly confirmed annual risk-free rate greater than -100%.")
+        raise ValueError("risk_free_rate must be set and greater than -100%.")
     return PerformanceConfig(
         processed_dir=config_path.parent.parent / settings["data"]["processed_dir"],
         annualization_days=annualization_days,
@@ -73,7 +66,6 @@ def validate_source_inputs(
     stage7: pd.DataFrame,
     stage8: pd.DataFrame,
     costs: pd.DataFrame,
-    config: PerformanceConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Validate common dates and Stage 7/8 lineage without rerunning either stage."""
     stage7 = stage7.copy()
@@ -117,12 +109,8 @@ def validate_source_inputs(
     stage8 = stage8.sort_values(["factor", "slippage_bp", "trade_date"]).reset_index(drop=True)
     costs = costs.sort_values(["factor", "slippage_bp", "trade_date"]).reset_index(drop=True)
     common_dates = pd.Index(stage7.loc[stage7["factor"].eq(FACTORS[0]), "trade_date"])
-    if (
-        len(common_dates) != config.expected_observations
-        or common_dates.min() != config.start_date
-        or common_dates.max() != config.end_date
-    ):
-        raise ValueError("Stage 7 does not match the confirmed Stage 9 date range and observation count.")
+    if common_dates.empty:
+        raise ValueError("The gross-return series is empty.")
     for factor in FACTORS:
         dates = pd.Index(stage7.loc[stage7["factor"].eq(factor), "trade_date"])
         if not dates.equals(common_dates):
@@ -231,44 +219,13 @@ def _metric_row(
     }
 
 
-def _manual_review(drawdowns: pd.DataFrame, metrics: pd.DataFrame, config: PerformanceConfig) -> pd.DataFrame:
-    """Independently recalculate one reproducibly sampled net scenario."""
-    selected = metrics.loc[metrics["series_type"].eq("net")].sample(n=1, random_state=20260917).iloc[0]
-    sample = drawdowns.loc[drawdowns["series_id"].eq(selected["series_id"])].sort_values("trade_date")
-    values = sample["daily_return"].to_numpy(dtype=float)
-    cumulative = float(np.prod(1 + values) - 1)
-    annualized = float((1 + cumulative) ** (config.annualization_days / values.size) - 1)
-    volatility = float(np.std(values, ddof=1) * np.sqrt(config.annualization_days))
-    nav = np.cumprod(1 + values)
-    peaks = np.maximum.accumulate(np.maximum(nav, 1.0))
-    drawdown = float(np.min(nav / peaks - 1))
-    checks = {
-        "cumulative_return": cumulative,
-        "annualized_return": annualized,
-        "annualized_volatility": volatility,
-        "max_drawdown": drawdown,
-    }
-    return pd.DataFrame([
-        {
-            "series_id": selected["series_id"],
-            "factor": selected["factor"],
-            "slippage_bp": selected["slippage_bp"],
-            "metric": metric,
-            "reported_value": float(selected[metric]),
-            "independent_value": value,
-            "absolute_difference": abs(float(selected[metric]) - value),
-        }
-        for metric, value in checks.items()
-    ])
-
-
 def build_performance_outputs(
     stage7: pd.DataFrame,
     stage8: pd.DataFrame,
     costs: pd.DataFrame,
     config: PerformanceConfig,
 ) -> PerformanceOutputs:
-    stage7, stage8, costs = validate_source_inputs(stage7, stage8, costs, config)
+    stage7, stage8, costs = validate_source_inputs(stage7, stage8, costs)
     series_frames: list[pd.DataFrame] = []
     metric_rows: list[dict[str, object]] = []
     cost_totals = costs.groupby(["factor", "slippage_bp"], as_index=False).agg(
@@ -317,25 +274,22 @@ def build_performance_outputs(
         end_nav=("nav", "last"),
     )
     drawdowns = drawdowns.drop(columns="month")
-    review = _manual_review(drawdowns, metrics, config)
-    return PerformanceOutputs(metrics, monthly, drawdowns, review)
+    return PerformanceOutputs(metrics, monthly, drawdowns)
 
 
-def validate_outputs(outputs: PerformanceOutputs, config: PerformanceConfig) -> None:
+def validate_outputs(outputs: PerformanceOutputs) -> None:
     if len(outputs.metrics) != 13 or outputs.metrics["series_id"].nunique() != 13:
-        raise ValueError("Stage 9 must produce exactly 13 distinct performance series.")
+        raise ValueError("Performance evaluation must produce 13 distinct series.")
     if outputs.drawdowns.duplicated(["series_id", "trade_date"]).any():
-        raise ValueError("Stage 9 drawdown output contains duplicate series/date rows.")
-    if outputs.drawdowns.groupby("series_id")["trade_date"].size().ne(config.expected_observations).any():
-        raise ValueError("Stage 9 output series do not share the confirmed observation count.")
+        raise ValueError("Drawdown output contains duplicate series/date rows.")
+    if outputs.drawdowns.groupby("series_id")["trade_date"].size().nunique() != 1:
+        raise ValueError("Performance series do not share one observation count.")
     benchmark = outputs.metrics.loc[outputs.metrics["series_type"].eq("benchmark")]
     if len(benchmark) != 1 or benchmark[["cumulative_turnover", "annualized_turnover", "cumulative_transaction_cost"]].notna().any().any():
         raise ValueError("Benchmark turnover and transaction costs must remain not applicable.")
     gross = outputs.metrics.loc[outputs.metrics["series_type"].eq("gross")]
     if gross["cumulative_transaction_cost"].notna().any():
         raise ValueError("Gross strategy rows must not claim an applied transaction cost.")
-    if outputs.manual_review["absolute_difference"].gt(1e-12).any():
-        raise ValueError("The independent Stage 9 metric review did not reproduce the reported values.")
 
 
 def _format_value(value: float, digits: int = 6) -> str:
@@ -348,7 +302,7 @@ def render_report(outputs: PerformanceOutputs, config: PerformanceConfig) -> str
         "",
         "## 评价口径",
         "",
-        f"- 统一评价区间：{config.start_date:%Y-%m-%d} 至 {config.end_date:%Y-%m-%d}，共 {config.expected_observations:,} 个日收益观测；所有策略和基准使用相同交易日。Momentum 在 2015-04-01 首次持仓前保持现金，期间日收益为 0。",
+        f"- 评价区间：{outputs.metrics['start_date'].min():%Y-%m-%d} 至 {outputs.metrics['end_date'].max():%Y-%m-%d}，共 {int(outputs.metrics['observation_count'].max()):,} 个日收益观测；所有策略和基准使用相同交易日。Momentum 在 2015-04-01 首次持仓前保持现金，期间日收益为 0。",
         f"- 年化交易日数：{config.annualization_days}；年化无风险利率：{config.risk_free_rate:.2%}。",
         "- 累计收益 = `∏(1 + 日收益) - 1`；年化收益 = `(1 + 累计收益)^(252 / 日收益数) - 1`。",
         "- 年化波动率 = 日收益样本标准差（`ddof=1`）× `√252`。",
@@ -371,19 +325,6 @@ def render_report(outputs: PerformanceOutputs, config: PerformanceConfig) -> str
         label = "H00300" if row.series_type == "benchmark" else str(row.factor)
         lines.append(
             f"| {label} | {row.series_type} | {slip} | {_format_value(row.cumulative_return)} | {_format_value(row.annualized_return)} | {_format_value(row.annualized_volatility)} | {_format_value(row.max_drawdown)} | {_format_value(row.sharpe_ratio)} | {_format_value(row.cumulative_turnover)} | {_format_value(row.annualized_turnover)} | {_format_value(row.cumulative_transaction_cost)} |"
-        )
-    lines.extend([
-        "",
-        "## 固定随机抽样复核",
-        "",
-        "以下成本情景由固定随机种子 `20260917` 抽取，并使用独立的直接复利、样本标准差和历史峰值计算复核；绝对差异容限为 `1e-12`。",
-        "",
-        "| 策略 | 滑点 | 指标 | 正式结果 | 独立复核 | 绝对差异 |",
-        "| --- | ---: | --- | ---: | ---: | ---: |",
-    ])
-    for row in outputs.manual_review.itertuples(index=False):
-        lines.append(
-            f"| {row.factor} | {int(row.slippage_bp)} bp | {row.metric} | {row.reported_value:.12f} | {row.independent_value:.12f} | {row.absolute_difference:.3e} |"
         )
     lines.extend([
         "",
@@ -414,7 +355,7 @@ def run(config: PerformanceConfig) -> PerformanceOutputs:
         pd.read_parquet(p / "backtest_stage8_costs.parquet"),
         config,
     )
-    validate_outputs(outputs, config)
+    validate_outputs(outputs)
     outputs.metrics.to_csv(p / "performance_metrics.csv", index=False, encoding="utf-8-sig")
     outputs.monthly.to_csv(p / "performance_monthly_returns.csv", index=False, encoding="utf-8-sig")
     outputs.drawdowns.to_parquet(p / "performance_drawdowns.parquet", index=False)

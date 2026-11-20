@@ -151,10 +151,6 @@ def render_report(outputs: CostOutputs, config: CostConfig) -> str:
     cost_totals = outputs.costs.groupby(["factor", "slippage_bp"], as_index=False)["total_transaction_cost"].sum().rename(columns={"total_transaction_cost": "cumulative_transaction_cost"})
     for row in latest.merge(cost_totals, on=["factor", "slippage_bp"]).sort_values(["factor", "slippage_bp"]).itertuples(index=False):
         lines.append(f"| {row.factor} | {row.slippage_bp} bp | {row.nav:.6f} | {row.net_nav:.6f} | {row.nav - 1:.6f} | {row.net_nav - 1:.6f} | {row.cumulative_transaction_cost:.6f} |")
-    lines.extend(["", "## 抽样复核", "", "| 因子 | 日期 | 滑点 | 买入额 | 卖出额 | 换手率 | 佣金 | 印花税 | 滑点成本 | 净成本 |", "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"])
-    samples = outputs.costs.loc[outputs.costs["slippage_bp"].eq(10)].sample(n=min(8, len(outputs.costs.loc[outputs.costs["slippage_bp"].eq(10)])), random_state=20260916).sort_values(["factor", "trade_date"])
-    for row in samples.itertuples(index=False):
-        lines.append(f"| {row.factor} | {row.trade_date:%Y-%m-%d} | {row.slippage_bp} bp | {row.actual_buy_amount:.6f} | {row.actual_sell_amount:.6f} | {row.turnover:.6f} | {row.commission:.6f} | {row.stamp_duty:.6f} | {row.slippage:.6f} | {row.total_transaction_cost:.6f} |")
     lines.extend(["", "## 限制", "", "- 佣金 3 bp 和滑点情景是研究假设，不代表某券商实际费率。缺少真实初始资金、股数和订单金额，无法判断最低 5 元佣金，故不纳入。", "- 涨跌停无法可靠识别；正常状态和有效开盘价不等于必然成交。成本仅对阶段 7 已记录的实际成交计提。", "- 2025-12-31 无后续执行日，未进入实际回测；买入未成交留现金，待卖出恢复可交易后卖出的既有规则不变。", "- 日频数据无法用盘口或逐笔成交估计真实滑点；现金收益为 0，未加入融资或借款。", ""])
     return "\n".join(lines)
 

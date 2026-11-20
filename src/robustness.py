@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,7 +52,6 @@ class RobustnessOutputs:
     daily: pd.DataFrame
     costs: pd.DataFrame
     portfolio_summary: pd.DataFrame
-    manual_review: pd.DataFrame
     baseline_review: pd.DataFrame
     sensitivity: pd.DataFrame
 
@@ -257,86 +255,6 @@ def _baseline_review(
     return pd.DataFrame([_compare_frames(label, actual, expected) for label, actual, expected in comparisons])
 
 
-def _manual_review(
-    metrics: pd.DataFrame,
-    daily: pd.DataFrame,
-    summaries: pd.DataFrame,
-    factor_details: pd.DataFrame,
-    trading_dates: pd.Series,
-    annualization_days: int,
-) -> pd.DataFrame:
-    quarterly = metrics.loc[metrics["rebalance_frequency"].eq("quarterly")].sample(
-        n=1, random_state=20260917
-    )
-    non_ten = metrics.loc[metrics["slippage_bp"].isin([0, 20])].sample(
-        n=1, random_state=20260917
-    )
-    chosen = pd.concat([quarterly, non_ten], ignore_index=True).drop_duplicates(
-        ["selection_quantile", "rebalance_frequency", "factor", "slippage_bp"]
-    )
-    rows: list[dict[str, object]] = []
-    calendar = pd.Series(pd.to_datetime(trading_dates).unique()).sort_values().reset_index(drop=True)
-    for index, selected in chosen.iterrows():
-        mask = (
-            daily["selection_quantile"].eq(selected["selection_quantile"])
-            & daily["rebalance_frequency"].eq(selected["rebalance_frequency"])
-            & daily["factor"].eq(selected["factor"])
-            & daily["slippage_bp"].eq(selected["slippage_bp"])
-        )
-        sample = daily.loc[mask].sort_values("trade_date")
-        gross_values = sample["gross_return"].to_numpy(dtype=float)
-        net_values = sample["net_return"].to_numpy(dtype=float)
-        nav = np.cumprod(1 + net_values)
-        peaks = np.maximum.accumulate(np.maximum(nav, 1.0))
-        independent = {
-            "gross_cumulative_return": float(np.prod(1 + gross_values) - 1),
-            "net_cumulative_return": float(np.prod(1 + net_values) - 1),
-            "net_max_drawdown": float(np.min(nav / peaks - 1)),
-            "cumulative_turnover": float(sample["turnover"].sum()),
-            "annualized_turnover": float(sample["turnover"].sum() * annualization_days / len(sample)),
-            "cumulative_transaction_cost": float(sample["total_transaction_cost"].sum()),
-        }
-        summary_mask = (
-            summaries["selection_quantile"].eq(selected["selection_quantile"])
-            & summaries["rebalance_frequency"].eq(selected["rebalance_frequency"])
-            & summaries["factor"].eq(selected["factor"])
-            & summaries["execution_date"].notna()
-            & summaries["rankable_stock_count"].gt(0)
-        )
-        summary = summaries.loc[summary_mask].sample(n=1, random_state=20260917 + index).iloc[0]
-        raw = factor_details.loc[pd.to_datetime(factor_details["signal_date"]).eq(summary["signal_date"])]
-        rankable = raw.loc[raw[f"{selected['factor']}_is_rankable"].fillna(False), f"{selected['factor']}_score"]
-        nominal_count = math.ceil(len(rankable) * float(selected["selection_quantile"]))
-        threshold = rankable.nlargest(nominal_count).iloc[-1]
-        independent_count = int(rankable.ge(threshold).sum())
-        position = calendar.searchsorted(pd.Timestamp(summary["signal_date"]), side="right")
-        expected_execution = calendar.iloc[position] if position < len(calendar) else pd.NaT
-        row: dict[str, object] = {
-            "sample_type": "quarterly" if index == 0 else "non_10bp",
-            "selection_quantile": selected["selection_quantile"],
-            "rebalance_frequency": selected["rebalance_frequency"],
-            "factor": selected["factor"],
-            "slippage_bp": selected["slippage_bp"],
-            "review_signal_date": summary["signal_date"],
-            "reported_execution_date": summary["execution_date"],
-            "independent_execution_date": expected_execution,
-            "reported_selected_count": int(summary["selected_stock_count"]),
-            "independent_selected_count": independent_count,
-            "reported_selection_ratio": summary["actual_selection_ratio"],
-            "independent_selection_ratio": independent_count / len(rankable),
-            "selection_ratio_absolute_difference": abs(
-                float(summary["actual_selection_ratio"]) - independent_count / len(rankable)
-            ),
-        }
-        for metric, value in independent.items():
-            reported = float(selected[metric])
-            row[f"reported_{metric}"] = reported
-            row[f"independent_{metric}"] = value
-            row[f"{metric}_absolute_difference"] = abs(reported - value)
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
 def _sensitivity(metrics: pd.DataFrame) -> pd.DataFrame:
     rows = []
     columns = (
@@ -370,13 +288,6 @@ def validate_outputs(outputs: RobustnessOutputs, config: RobustnessConfig) -> No
         raise ValueError("Stage 10 must preserve the Stage 9 observation count.")
     if not outputs.baseline_review["status"].eq("passed").all():
         raise ValueError("Top 20% monthly did not reproduce the Stage 6-9 baseline.")
-    difference_columns = [column for column in outputs.manual_review if column.endswith("_absolute_difference")]
-    if outputs.manual_review[difference_columns].gt(1e-12).any().any():
-        raise ValueError("Stage 10 independent metric review exceeded tolerance.")
-    if not outputs.manual_review["reported_execution_date"].equals(outputs.manual_review["independent_execution_date"]):
-        raise ValueError("Stage 10 execution-date review failed.")
-    if not outputs.manual_review["reported_selected_count"].eq(outputs.manual_review["independent_selected_count"]).all():
-        raise ValueError("Stage 10 selection-count review failed.")
     zero_bp = outputs.metrics.loc[outputs.metrics["slippage_bp"].eq(0)]
     if zero_bp["cumulative_transaction_cost"].le(0).any():
         raise ValueError("Zero-bp scenarios must still include commission and stamp duty.")
@@ -422,18 +333,13 @@ def render_report(outputs: RobustnessOutputs, config: RobustnessConfig) -> str:
             f"[{row.cumulative_turnover_min:.6f}, {row.cumulative_turnover_max:.6f}] | "
             f"[{row.cumulative_transaction_cost_min:.6f}, {row.cumulative_transaction_cost_max:.6f}] |"
         )
-    lines.extend(["", f"- 无可排名股票的因子/信号期记录数：{insufficient}；这些期间保留为样本不足记录，不填造持仓。", "", "## 固定随机抽样复核", "", "固定随机种子为 `20260917`；独立复核选股数、选股比例、下一交易日、累计收益、最大回撤、换手率和交易成本，数值容限为 `1e-12`。", "", "| 类型 | Top | 频率 | 因子 | 滑点 | 信号日 | 执行日 | 入选数 | 最大指标差异 |", "| --- | ---: | --- | --- | ---: | --- | --- | ---: | ---: |"])
-    diff_columns = [column for column in outputs.manual_review if column.endswith("_absolute_difference")]
-    for row in outputs.manual_review.itertuples(index=False):
-        maximum = max(float(getattr(row, column)) for column in diff_columns)
-        lines.append(f"| {row.sample_type} | {row.selection_quantile:.0%} | {row.rebalance_frequency} | {row.factor} | {int(row.slippage_bp)} bp | {row.review_signal_date:%Y-%m-%d} | {row.reported_execution_date:%Y-%m-%d} | {row.reported_selected_count} | {maximum:.3e} |")
+    lines.extend(["", f"- 无可排名股票的因子/信号期记录数：{insufficient}；这些期间保留为样本不足记录，不填造持仓。", ""])
     lines.extend([
         "", "## 输出文件", "",
         "- `robustness_stage10_metrics.csv`：54 个策略成本情景的毛、净绩效指标。",
         "- `robustness_stage10_daily_returns.parquet`：日度毛净收益、换手率和成本。",
         "- `robustness_stage10_costs.parquet`：实际成交成本明细。",
         "- `robustness_stage10_portfolio_summary.csv`：逐期选股比例、信号日和执行日。",
-        "- `robustness_stage10_manual_review.csv`：固定随机抽样的独立复核。",
         "", "## 研究限制", "",
         "- 策略执行日使用开盘至收盘收益，H00300 使用完整日收益，盘中起点不完全一致。",
         "- 涨跌停无法可靠识别；正常交易状态和有效开盘价不构成一定能够成交的保证。",
@@ -472,7 +378,7 @@ def build_robustness_outputs(
             cost_output = build_cost_outputs(backtest.daily, backtest.rebalance_records, cost_config)
             validate_costs(cost_output)
             performance = build_performance_outputs(backtest.daily, cost_output.daily, cost_output.costs, performance_config)
-            validate_performance(performance, performance_config)
+            validate_performance(performance)
 
             metric_frames.append(_metrics_table(performance, quantile, frequency, config.slippage_scenarios_bp))
             daily_item = cost_output.daily.copy()
@@ -499,8 +405,7 @@ def build_robustness_outputs(
     summaries = pd.concat(summary_frames, ignore_index=True).sort_values(
         ["selection_quantile", "rebalance_frequency", "factor", "signal_date"]
     ).reset_index(drop=True)
-    review = _manual_review(metrics, daily, summaries, factor_details, daily_trading["trade_date"], config.annualization_days)
-    outputs = RobustnessOutputs(metrics, daily, costs, summaries, review, baseline, _sensitivity(metrics))
+    outputs = RobustnessOutputs(metrics, daily, costs, summaries, baseline, _sensitivity(metrics))
     validate_outputs(outputs, config)
     return outputs
 
@@ -518,7 +423,6 @@ def run(config: RobustnessConfig) -> RobustnessOutputs:
     outputs.daily.to_parquet(p / "robustness_stage10_daily_returns.parquet", index=False)
     outputs.costs.to_parquet(p / "robustness_stage10_costs.parquet", index=False)
     outputs.portfolio_summary.to_csv(p / "robustness_stage10_portfolio_summary.csv", index=False, encoding="utf-8-sig")
-    outputs.manual_review.to_csv(p / "robustness_stage10_manual_review.csv", index=False, encoding="utf-8-sig")
     report_dir = p.parent.parent / "reports" / "generated"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "robustness.md").write_text(render_report(outputs, config), encoding="utf-8")

@@ -260,12 +260,11 @@ def validate_outputs(outputs: BacktestOutputs) -> None:
 
 
 def render_report(outputs: BacktestOutputs) -> str:
-    daily, monthly, records = outputs.daily, outputs.monthly, outputs.rebalance_records
+    daily, monthly = outputs.daily, outputs.monthly
     lines = ["# 历史回测", "", "## 固定规则", "", "- 初始净值为 1，现金收益为 0；不计交易成本、融资、整手约束、Sharpe 或稳健性测试。", "- 每个执行日按开盘前组合净值把当期目标组合恢复为等权：先完全退出和超配减仓，再新建和低配加仓。", "- 可执行买单在现金不足时同比例缩放；新建和继续持仓调权失败不跨日追单，只有完全退出失败进入待卖并逐日重试。", "- 开盘交易后的剩余或新增持仓按 `close_price / open_price - 1` 计当日价格收益；未在当日开盘交易的整日持仓使用 `Dretwd`。", "", "## 结果汇总", "", "| 因子 | 起始日 | 结束日 | 期末净值 | 累计毛收益 | 月度记录数 |", "| --- | --- | --- | ---: | ---: | ---: |"]
     for factor, item in daily.groupby("factor", sort=True): lines.append(f"| {factor} | {item.trade_date.min():%Y-%m-%d} | {item.trade_date.max():%Y-%m-%d} | {item.nav.iloc[-1]:.6f} | {item.nav.iloc[-1] - 1:.6f} | {len(monthly.loc[monthly.factor.eq(factor)])} |")
     last = daily.loc[daily.factor.eq("pe")].iloc[-1]
-    lines.extend(["", f"- H00300 同期净值：{last.benchmark_nav:.6f}；累计收益 {last.benchmark_nav - 1:.6f}。", f"- 冻结估值持仓日：{int(daily.frozen_valuation_count.sum()):,}；期末待卖出持仓：{int(daily.loc[daily.trade_date.eq(last.trade_date), 'pending_sale_count'].sum()):,}。", "", "## 固定抽样复核", "", "| 因子 | 日期 | 股票 | 调仓原因 | 状态 | 请求开盘金额 | 实际开盘金额 |", "| --- | --- | --- | --- | --- | ---: | ---: |"])
-    for row in records.sample(n=min(8, len(records)), random_state=20260916).sort_values(["factor", "trade_date", "stock_code"]).itertuples(index=False): lines.append(f"| {row.factor} | {row.trade_date:%Y-%m-%d} | {row.stock_code} | {row.trade_reason} | {row.status} | {row.requested_open_value:.6f} | {row.executed_open_value:.6f} |")
+    lines.extend(["", f"- H00300 同期净值：{last.benchmark_nav:.6f}；累计收益 {last.benchmark_nav - 1:.6f}。", f"- 冻结估值持仓日：{int(daily.frozen_valuation_count.sum()):,}；期末待卖出持仓：{int(daily.loc[daily.trade_date.eq(last.trade_date), 'pending_sale_count'].sum()):,}。", ""])
     lines.extend(["", "## 限制", "", "- 2025-12-31 没有后续执行日，未进入实际回测。", "- H00300 缺少可靠开盘价：基准在执行日使用完整 `Idxtrd08` 日收益，策略使用开盘至收盘收益，首日并非严格同一盘中起点。", "- 涨跌停无法可靠识别；正常状态和有效开盘价不构成成交保证。", "- 缺失或无效收益记录冻结最后可得估值；期末未恢复可交易的待卖出持仓不被虚构为已卖出。", ""])
     return "\n".join(lines)
 

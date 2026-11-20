@@ -10,7 +10,9 @@ import numpy as np
 import pandas as pd
 import yaml
 
-STATUS_CONFLICTS = (
+# 这两只股票在 STK_ITEMCHANGE 里记录的上市状态生效日与当日实际交易状态互相矛盾。
+# 无法判断哪一侧是对的，按冲突区间整段排除，而不是把不确定的状态当成确定状态用。
+STATUS_CONFLICT_INTERVALS = (
     ("600200", pd.Timestamp("2025-12-10"), pd.Timestamp("2025-12-29")),
     ("600701", pd.Timestamp("2021-03-15"), pd.Timestamp("2021-04-26")),
 )
@@ -90,7 +92,7 @@ def _status_as_of(panel: pd.DataFrame, status_changes: pd.DataFrame) -> pd.DataF
 
 def _conflict_mask(frame: pd.DataFrame) -> pd.Series:
     mask = pd.Series(False, index=frame.index)
-    for stock_code, start, end in STATUS_CONFLICTS:
+    for stock_code, start, end in STATUS_CONFLICT_INTERVALS:
         mask |= frame["stock_code"].eq(stock_code) & frame["signal_date"].between(start, end)
     return mask
 
@@ -164,62 +166,23 @@ def validate_outputs(outputs: UniverseOutputs) -> None:
         raise ValueError("Period counts do not reconcile to the detailed universe.")
 
 
-def _audit_sample(outputs: UniverseOutputs, daily_trading: pd.DataFrame, status_changes: pd.DataFrame) -> pd.DataFrame:
-    """Return deterministic post-hoc audit fields; never use them in pool construction."""
-    sample = outputs.pool.sample(n=min(5, len(outputs.pool)), random_state=20260915).copy()
-    last_trade = daily_trading.groupby("stock_code", as_index=False)["trade_date"].max().rename(columns={"trade_date": "post_hoc_last_observed_trade_date"})
-    terminal = status_changes.loc[
-        status_changes["ChangedItem"].eq("上市状态") & status_changes["ValueAfter"].eq("终止上市"), ["stock_code", "event_date"]
-    ].groupby("stock_code", as_index=False)["event_date"].min().rename(columns={"event_date": "post_hoc_termination_effective_date"})
-    return sample.merge(last_trade, on="stock_code", how="left").merge(terminal, on="stock_code", how="left")
-
-
-def _terminal_audit_sample(outputs: UniverseOutputs, daily_trading: pd.DataFrame, status_changes: pd.DataFrame) -> pd.DataFrame:
-    """Select terminated names with a pre-termination pool observation for audit evidence."""
-    terminal = status_changes.loc[
-        status_changes["ChangedItem"].eq("上市状态") & status_changes["ValueAfter"].eq("终止上市"), ["stock_code", "event_date"]
-    ].groupby("stock_code", as_index=False)["event_date"].min().rename(columns={"event_date": "termination_effective_date"})
-    prior_pool = outputs.pool.merge(terminal, on="stock_code", how="inner")
-    prior_pool = prior_pool.loc[prior_pool["signal_date"].lt(prior_pool["termination_effective_date"])]
-    prior_pool = prior_pool.sort_values("signal_date").groupby("stock_code", as_index=False).tail(1)
-    last_trade = daily_trading.groupby("stock_code", as_index=False)["trade_date"].max().rename(columns={"trade_date": "last_observed_trade_date"})
-    return prior_pool.merge(last_trade, on="stock_code", how="left").sample(n=min(3, len(prior_pool)), random_state=20260915)
-
-
-def render_report(outputs: UniverseOutputs, daily_trading: pd.DataFrame, status_changes: pd.DataFrame, config: UniverseConfig) -> str:
-    """Render the Stage 3 evidence report from the generated outputs."""
-    sample = _audit_sample(outputs, daily_trading, status_changes)
+def render_report(outputs: UniverseOutputs, config: UniverseConfig) -> str:
+    """Render the universe report from the generated outputs."""
     reason_counts = outputs.exclusions["exclusion_reasons"].str.split("\\|").explode().value_counts().sort_index()
     lines = [
         "# 历史股票池", "", "## 生成范围与口径", "",
         f"- 信号日：候选市场 `{', '.join(sorted(config.markets))}` 的交易日历 `State=O` 中每月最后一个交易日，共 {len(outputs.signal_dates)} 期（{outputs.signal_dates.min():%Y-%m-%d} 至 {outputs.signal_dates.max():%Y-%m-%d}）。",
         f"- 纳入条件：调仓日有日交易记录、`Trdsta={config.normal_trading_status}`、首次上市满 {config.min_listing_months} 个自然月，且未处于截至该日已生效的暂停上市、退市整理期或终止上市状态。",
-        "- 状态只按 `ChangeDate`（标准字段 `event_date`）在信号日或之前生效；未来状态不倒推。`600200`（2025-12-10 至 2025-12-29）与 `600701`（2021-03-15 至 2021-04-26）的已审计冲突区间作为数据质量例外排除。",
-        "- 本阶段只决定新建股票池；不定义后续持仓期间的停牌、ST 或退市收益和交易处理。", "",
+        "- 状态只按 `ChangeDate`（标准字段 `event_date`）在信号日或之前生效，未来状态不倒推。",
+        "- 600200（2025-12-10 至 2025-12-29）与 600701（2021-03-15 至 2021-04-26）的状态变更日与当日交易状态冲突，整段排除。", "",
         "## 输出核对", "",
         f"- 股票池明细：{len(outputs.pool):,} 条 `(signal_date, stock_code)` 记录，无重复键。",
         f"- 期间汇总：{len(outputs.period_summary):,} 期；每期股票池均非空。",
-        f"- 排除审计：{len(outputs.exclusions):,} 条逐股票逐期记录；同一条记录可同时具有多个排除原因。", "",
+        f"- 排除记录：{len(outputs.exclusions):,} 条，逐股票逐期保留原因，可按信号日复算名单。", "",
         "### 排除原因计数", "", "| 排除原因 | 记录数 |", "| --- | ---: |",
     ]
     lines.extend(f"| `{reason}` | {int(count):,} |" for reason, count in reason_counts.items())
-    lines.extend(["", "## 可复核抽样", "", "以下样本以固定随机种子 `20260915` 从已纳入明细中抽取。`post_hoc_*` 列仅用于事后核对上市后的交易/退出证据，未参与任何信号日筛选。", "", "| 信号日 | 股票 | 上市日 | 当日市场 | 当日状态 | 当期上市状态 | 状态生效日 | 资料中最后交易日 | 终止上市生效日 |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"])
-    def text(value: object) -> str:
-        if pd.isna(value):
-            return "—"
-        return pd.Timestamp(value).strftime("%Y-%m-%d") if isinstance(value, pd.Timestamp) else str(value)
-    for row in sample.itertuples(index=False):
-        lines.append("| " + " | ".join(text(getattr(row, name)) for name in [
-            "signal_date", "stock_code", "listing_date", "market_type", "trading_status", "listing_status",
-            "listing_status_effective_date", "post_hoc_last_observed_trade_date", "post_hoc_termination_effective_date",
-        ]) + " |")
-    terminal_sample = _terminal_audit_sample(outputs, daily_trading, status_changes)
-    lines.extend(["", "### 退出状态核对", "", "以下为固定随机种子 `20260915` 从有终止上市事件、且终止前曾进入股票池的股票中抽取。终止上市生效日之后不进入新建股票池。", "", "| 终止前最后入池信号日 | 股票 | 上市日 | 最后观察交易日 | 终止上市生效日 |", "| --- | --- | --- | --- | --- |"])
-    for row in terminal_sample.itertuples(index=False):
-        lines.append("| " + " | ".join(text(getattr(row, name)) for name in [
-            "signal_date", "stock_code", "listing_date", "last_observed_trade_date", "termination_effective_date",
-        ]) + " |")
-    lines.extend(["", "## 验收", "", "- 任意信号日均按当日可得信息建立股票池，不使用当前存活名单替代历史截面。", "- `universe_period_summary.csv` 的新增、退出和股票数量可由相邻期 `historical_universe.parquet` 名单复算。", "- ST/非正常交易、停牌（无当日记录）、次新股、退市相关状态和状态冲突区间均在 `universe_exclusions.parquet` 中保留原因。", "- 阶段 4 的 PE、Momentum、ROE 计算及其数据可得性判断不属于本阶段。", ""])
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -240,10 +203,9 @@ def run(config: UniverseConfig) -> UniverseOutputs:
     outputs.pool.to_parquet(directory / "historical_universe.parquet", index=False)
     outputs.period_summary.to_csv(directory / "universe_period_summary.csv", index=False, encoding="utf-8-sig")
     outputs.exclusions.to_parquet(directory / "universe_exclusions.parquet", index=False)
-    audit_daily = pd.read_parquet(directory / "daily_trading.parquet", columns=["stock_code", "trade_date"])
     report_dir = directory.parent.parent / "reports" / "generated"
     report_dir.mkdir(parents=True, exist_ok=True)
-    (report_dir / "universe.md").write_text(render_report(outputs, audit_daily, status, config), encoding="utf-8")
+    (report_dir / "universe.md").write_text(render_report(outputs, config), encoding="utf-8")
     return outputs
 
 

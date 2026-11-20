@@ -263,10 +263,6 @@ def render_report(outputs: FactorTestOutputs) -> str:
         mean = "—" if pd.isna(row.ic_mean) else f"{row.ic_mean:.4f}"
         win = "—" if pd.isna(row.ic_win_rate) else f"{row.ic_win_rate:.4f}"
         lines.append(f"| {row.factor} | {row.test_eligible_rows} | {row.ic_valid_periods} | {mean} | {win} | {row.missing_first_holding_day_rows} | {row.early_exit_or_data_cutoff_rows} | {row.extreme_return_stock_rows} | {row.empty_group_rows} |")
-    lines.extend(["", "## 固定抽样复核", "", "以下为固定随机种子 `20260916` 的可检验股票未来收益样本；`forward_return` 为持有窗口内有效 `Dretwd` 的连乘结果。", "", "| 因子 | 信号日 | 股票 | 首个持有日 | 期末 | 最后可观察日 | 未来收益 | 五分位 |", "| --- | --- | --- | --- | --- | --- | ---: | ---: |"])
-    sample = outputs.members.sample(n=min(8, len(outputs.members)), random_state=20260916).sort_values(["factor", "signal_date", "stock_code"])
-    for row in sample.itertuples(index=False):
-        lines.append(f"| {row.factor} | {row.signal_date:%Y-%m-%d} | {row.stock_code} | {row.first_holding_date:%Y-%m-%d} | {row.holding_end_date:%Y-%m-%d} | {row.last_observed_date:%Y-%m-%d} | {row.forward_return:.6f} | Q{row.quantile} |")
     lines.extend(["", "## 口径限制", "", "- 2025-12-31 没有后续持有期数据，未进入分组收益或 IC。", "- Momentum 在 2014-09 至 2015-02 没有可用六个月历史价格，未进行分组或 IC。", "- PE 按交易日 `PE1TTM` 可用的既定口径处理；该限制仅在最终报告中说明。", ""])
     return "\n".join(lines)
 

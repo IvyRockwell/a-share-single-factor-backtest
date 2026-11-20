@@ -221,7 +221,6 @@ def validate_outputs(outputs: PortfolioOutputs, config: PortfolioConfig) -> None
 def render_report(outputs: PortfolioOutputs, config: PortfolioConfig) -> str:
     """Render a compact reproducible Stage 6 audit report."""
     summary = outputs.period_summary
-    sample = outputs.targets.sample(n=min(8, len(outputs.targets)), random_state=20260916).sort_values(["factor", "signal_date", "stock_code"])
     lines = [
         "# 单因子目标组合与执行审计", "", "## 固定规则", "",
         f"- 每个因子独立在每个信号日从可排名股票中选择 Top {config.selection_quantile:.0%}；边界同分全部保留，不按股票代码拆分。",
@@ -232,11 +231,7 @@ def render_report(outputs: PortfolioOutputs, config: PortfolioConfig) -> str:
         "- 2025-12-31 的目标候选保留，但因数据末端没有后续执行日而不标记为已执行。", "", "## 输出核对", "",
         f"- 目标持仓：{len(outputs.targets):,} 条；调仓动作：{len(outputs.actions):,} 条；逐期汇总：{len(summary):,} 条。",
         f"- 各期目标权重均为 1；不可买入对应的目标现金权重总和为 {summary['unfilled_buy_cash_weight'].sum():.6f}。", "",
-        "## 固定抽样复核", "", "| 因子 | 信号日 | 股票 | 因子分数 | 入选排名百分位 | 目标权重 | 执行日 | 执行状态 | 原因 |", "| --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |",
     ]
-    for row in sample.itertuples(index=False):
-        execution = "—" if pd.isna(row.execution_date) else f"{row.execution_date:%Y-%m-%d}"
-        lines.append(f"| {row.factor} | {row.signal_date:%Y-%m-%d} | {row.stock_code} | {row.factor_score:.6f} | {row.selection_rank_pct:.6f} | {row.target_weight:.8f} | {execution} | {row.execution_status} | {row.execution_reason} |")
     lines.extend(["", "## 限制", "", "- 本阶段只形成目标组合和执行审计，不计算实际市值权重、现金收益、组合收益或延迟卖出后的成交结果。", "- 现有可靠字段不足以识别涨跌停造成的拒单；该限制不被静默视为可成交。", ""])
     return "\n".join(lines)
 
