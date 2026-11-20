@@ -68,7 +68,7 @@ src/visualization.py    研究图表
 reports/research_note.md   研究笔记（定稿）
 reports/figures/           18 张图
 notebooks/01_data_exploration.ipynb  原始数据探查
-tests/                     71 个用例（构造数据，不依赖原始数据）
+tests/                     74 个用例（构造数据，不依赖原始数据）
 run.py                     命令行入口
 ```
 

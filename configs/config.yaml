@@ -26,7 +26,8 @@ benchmark:
 factors:
   momentum_lookback_months: 6
   quantile_groups: 5
-  value_metric: PE1TTM
+  value_metric: disclosure_timed_pe   # 披露日 TTM 净利润 ÷ 总市值
+  value_metric_vendor: PE1TTM          # 供应商字段，仅作逐月对照
   quality_metric: ROE
   pe_availability_assumption: disclosure_date
 
