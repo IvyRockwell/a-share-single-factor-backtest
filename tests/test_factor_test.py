@@ -77,7 +77,7 @@ def test_repeated_q5_minus_q1_cumulative_value_is_identical_across_all_quantiles
 
 
 def test_rank_ic_requires_minimum_pairs_and_reports_positive_win() -> None:
-    small = pd.DataFrame({"factor": ["pe"] * 3, "signal_date": pd.to_datetime(["2021-01-29"] * 3), "test_eligible": [True] * 3, "factor_score": [0.1, 0.2, 0.3], "forward_return": [0.1, 0.2, 0.3]})
+    small = pd.DataFrame({"factor": ["pe"] * 3, "score_type": ["raw"] * 3, "signal_date": pd.to_datetime(["2021-01-29"] * 3), "test_eligible": [True] * 3, "factor_score": [0.1, 0.2, 0.3], "forward_return": [0.1, 0.2, 0.3]})
     result = build_ic_series(small, 4).iloc[0]
     assert result["ic_unavailable_reason"] == "insufficient_valid_pairs"
     enough = pd.concat([small, small.assign(signal_date=pd.Timestamp("2021-02-26"))], ignore_index=True)

@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import yaml
@@ -165,57 +166,77 @@ def assign_quantiles(scores: pd.Series, quantile_groups: int) -> pd.Series:
     return result
 
 
+def available_score_types(factor_details: pd.DataFrame) -> list[tuple[str, str, str]]:
+    """Return the (score_type, score suffix, eligibility suffix) triples that exist."""
+    types = [("raw", "_score", "_is_rankable")]
+    if "pe_neutral_eligible" in factor_details.columns:
+        types.append(("raw_neutral_sample", "_score", "_neutral_eligible"))
+        types.append(("neutral", "_score_neutral", "_neutral_eligible"))
+    return types
+
+
 def build_factor_test_details(factor_details: pd.DataFrame, forward_returns: pd.DataFrame,
-                              quantile_groups: int) -> pd.DataFrame:
+                              quantile_groups: int, score_type: str = "raw",
+                              score_suffix: str = "_score",
+                              eligibility_suffix: str = "_is_rankable") -> pd.DataFrame:
     """Expand common forward returns into factor-specific eligibility and groups."""
     frames = []
     for factor in FACTORS:
-        frame = factor_details[["signal_date", "stock_code", f"{factor}_score", f"{factor}_is_rankable", f"{factor}_unrankable_reason"]].copy()
-        frame = frame.rename(columns={f"{factor}_score": "factor_score", f"{factor}_is_rankable": "factor_is_rankable", f"{factor}_unrankable_reason": "factor_unrankable_reason"})
+        frame = factor_details[["signal_date", "stock_code"]].copy()
         frame["factor"] = factor
+        frame["factor_score"] = factor_details[f"{factor}{score_suffix}"].astype("Float64").astype("float64").to_numpy()
+        frame["factor_is_rankable"] = factor_details[f"{factor}_is_rankable"].fillna(False).astype(bool).to_numpy()
+        frame["score_eligible"] = factor_details[f"{factor}{eligibility_suffix}"].fillna(False).astype(bool).to_numpy()
+        frame["factor_unrankable_reason"] = factor_details[f"{factor}_unrankable_reason"].to_numpy()
         frame = frame.merge(forward_returns, on=["signal_date", "stock_code"], how="left", validate="one_to_one")
-        factor_rankable = frame["factor_is_rankable"].fillna(False).astype(bool)
+        frame["score_type"] = score_type
         forward_eligible = frame["forward_eligible"].fillna(False).astype(bool)
-        frame["test_eligible"] = factor_rankable & forward_eligible
+        frame["test_eligible"] = frame["score_eligible"] & forward_eligible
         frame["test_unavailable_reason"] = frame["forward_unavailable_reason"].astype("string")
-        missing_factor = frame["test_unavailable_reason"].isna() & ~factor_rankable
-        frame.loc[missing_factor, "test_unavailable_reason"] = "factor_unrankable:" + frame.loc[missing_factor, "factor_unrankable_reason"].fillna("unknown")
+        missing_score = frame["test_unavailable_reason"].isna() & ~frame["score_eligible"]
+        frame.loc[missing_score, "test_unavailable_reason"] = "factor_unrankable:" + frame.loc[missing_score, "factor_unrankable_reason"].fillna("unknown")
         frame["quantile"] = pd.Series(pd.NA, index=frame.index, dtype="Int64")
         for _, indexes in frame.loc[frame["test_eligible"]].groupby("signal_date").groups.items():
             frame.loc[indexes, "quantile"] = assign_quantiles(frame.loc[indexes, "factor_score"], quantile_groups)
         frames.append(frame)
-    return pd.concat(frames, ignore_index=True).sort_values(["factor", "signal_date", "stock_code"]).reset_index(drop=True)
+    return pd.concat(frames, ignore_index=True).sort_values(
+        ["score_type", "factor", "signal_date", "stock_code"]).reset_index(drop=True)
 
 
 def build_quantile_returns(details: pd.DataFrame, quantile_groups: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     members = details.loc[details["quantile"].notna()].copy()
-    grouped = members.groupby(["factor", "signal_date", "quantile"], as_index=False).agg(
+    keys = ["factor", "score_type", "signal_date", "quantile"]
+    grouped = members.groupby(keys, as_index=False).agg(
         stock_count=("stock_code", "size"),
         equal_weight_forward_return=("forward_return", "mean"),
         extreme_return_stock_count=("extreme_return_days", lambda values: int(values.gt(0).sum())),
         early_exit_or_data_cutoff_count=("early_exit_or_data_cutoff", "sum"),
     )
-    periods = details.loc[details["test_eligible"], ["factor", "signal_date"]].drop_duplicates()
+    periods = details.loc[details["test_eligible"], ["factor", "score_type", "signal_date"]].drop_duplicates()
     grid = periods.merge(pd.DataFrame({"quantile": range(1, quantile_groups + 1)}), how="cross")
-    output = grid.merge(grouped, on=["factor", "signal_date", "quantile"], how="left", validate="one_to_one")
+    output = grid.merge(grouped, on=keys, how="left", validate="one_to_one")
     output["stock_count"] = output["stock_count"].fillna(0).astype("int64")
     output["empty_group"] = output["stock_count"].eq(0)
-    output = output.sort_values(["factor", "quantile", "signal_date"]).reset_index(drop=True)
-    output["cumulative_group_return"] = output.groupby(["factor", "quantile"])["equal_weight_forward_return"].transform(lambda values: (1 + values.fillna(0)).cumprod() - 1)
-    wide = output.pivot(index=["factor", "signal_date"], columns="quantile", values="equal_weight_forward_return")
+    output = output.sort_values(["factor", "score_type", "quantile", "signal_date"]).reset_index(drop=True)
+    output["cumulative_group_return"] = output.groupby(["factor", "score_type", "quantile"])[
+        "equal_weight_forward_return"
+    ].transform(lambda values: (1 + values.fillna(0)).cumprod() - 1)
+    wide = output.pivot(index=["factor", "score_type", "signal_date"], columns="quantile",
+                        values="equal_weight_forward_return")
     spread = wide.get(quantile_groups).sub(wide.get(1)).rename("q_high_minus_q_low").reset_index()
-    spread = spread.sort_values(["factor", "signal_date"]).reset_index(drop=True)
+    spread = spread.sort_values(["factor", "score_type", "signal_date"]).reset_index(drop=True)
     spread["cumulative_q_high_minus_q_low"] = (
-        spread.groupby("factor")["q_high_minus_q_low"]
+        spread.groupby(["factor", "score_type"])["q_high_minus_q_low"]
         .transform(lambda values: values.fillna(0).cumsum())
     )
-    output = output.merge(spread, on=["factor", "signal_date"], how="left")
-    return members, output.sort_values(["factor", "signal_date", "quantile"]).reset_index(drop=True)
+    output = output.merge(spread, on=["factor", "score_type", "signal_date"], how="left")
+    return members, output.sort_values(["factor", "score_type", "signal_date", "quantile"]).reset_index(drop=True)
 
 
 def build_ic_series(details: pd.DataFrame, min_ic_pairs: int) -> pd.DataFrame:
     rows = []
-    for (factor, signal_date), group in details.loc[details["test_eligible"]].groupby(["factor", "signal_date"], sort=True):
+    keys = ["factor", "score_type", "signal_date"]
+    for (factor, score_type, signal_date), group in details.loc[details["test_eligible"]].groupby(keys, sort=True):
         pair_count = len(group)
         ic, reason = pd.NA, pd.NA
         if pair_count < min_ic_pairs:
@@ -226,17 +247,49 @@ def build_ic_series(details: pd.DataFrame, min_ic_pairs: int) -> pd.DataFrame:
                 reason = "constant_factor_or_forward_return"
             else:
                 ic = float(calculated)
-        rows.append({"factor": factor, "signal_date": signal_date, "ic_pair_count": pair_count, "rank_ic": ic, "ic_unavailable_reason": reason})
+        rows.append({"factor": factor, "score_type": score_type, "signal_date": signal_date,
+                     "ic_pair_count": pair_count, "rank_ic": ic, "ic_unavailable_reason": reason})
     return pd.DataFrame(rows)
+
+
+def _mean_ir_t(values: pd.Series) -> tuple[float | pd.NA, float | pd.NA, float | pd.NA]:
+    """Mean, information ratio, and t statistic of a monthly series."""
+    clean = values.dropna()
+    if len(clean) < 2:
+        return pd.NA, pd.NA, pd.NA
+    mean = float(clean.mean())
+    spread = float(clean.std(ddof=1))
+    if spread == 0:
+        return mean, pd.NA, pd.NA
+    ratio = mean / spread
+    return mean, ratio, ratio * np.sqrt(len(clean))
 
 
 def build_summary(details: pd.DataFrame, quantile_returns: pd.DataFrame, ic_series: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for factor in FACTORS:
-        item = details.loc[details["factor"].eq(factor)]
-        ic = ic_series.loc[ic_series["factor"].eq(factor), "rank_ic"].dropna()
-        groups = quantile_returns.loc[quantile_returns["factor"].eq(factor)]
-        rows.append({"factor": factor, "signal_periods": int(item["signal_date"].nunique()), "test_eligible_rows": int(item["test_eligible"].sum()), "no_future_holding_period_rows": int(item["test_unavailable_reason"].eq("no_future_holding_period").sum()), "missing_first_holding_day_rows": int(item["test_unavailable_reason"].eq("missing_valid_first_holding_day").sum()), "early_exit_or_data_cutoff_rows": int(item.loc[item["test_eligible"], "early_exit_or_data_cutoff"].sum()), "extreme_return_stock_rows": int(item.loc[item["test_eligible"], "extreme_return_days"].gt(0).sum()), "empty_group_rows": int(groups["empty_group"].sum()), "ic_valid_periods": int(ic.size), "ic_mean": ic.mean() if not ic.empty else pd.NA, "ic_win_rate": ic.gt(0).mean() if not ic.empty else pd.NA})
+    for (factor, score_type), item in details.groupby(["factor", "score_type"], sort=True):
+        ic = ic_series.loc[ic_series["factor"].eq(factor) & ic_series["score_type"].eq(score_type), "rank_ic"]
+        groups = quantile_returns.loc[
+            quantile_returns["factor"].eq(factor) & quantile_returns["score_type"].eq(score_type)
+        ]
+        spread = groups.loc[groups["quantile"].eq(1), ["signal_date", "q_high_minus_q_low"]].drop_duplicates()
+        ic_mean, ic_ir, ic_t = _mean_ir_t(ic)
+        spread_mean, _, spread_t = _mean_ir_t(spread["q_high_minus_q_low"])
+        rows.append({
+            "factor": factor, "score_type": score_type,
+            "signal_periods": int(item["signal_date"].nunique()),
+            "test_eligible_rows": int(item["test_eligible"].sum()),
+            "no_future_holding_period_rows": int(item["test_unavailable_reason"].eq("no_future_holding_period").sum()),
+            "missing_first_holding_day_rows": int(item["test_unavailable_reason"].eq("missing_valid_first_holding_day").sum()),
+            "early_exit_or_data_cutoff_rows": int(item.loc[item["test_eligible"], "early_exit_or_data_cutoff"].sum()),
+            "extreme_return_stock_rows": int(item.loc[item["test_eligible"], "extreme_return_days"].gt(0).sum()),
+            "empty_group_rows": int(groups["empty_group"].sum()),
+            "ic_valid_periods": int(ic.notna().sum()),
+            "ic_mean": ic_mean, "ic_std": float(ic.std(ddof=1)) if ic.notna().sum() > 1 else pd.NA,
+            "ic_ir": ic_ir, "ic_t": ic_t,
+            "ic_win_rate": ic.gt(0).mean() if ic.notna().any() else pd.NA,
+            "spread_mean": spread_mean, "spread_t": spread_t,
+        })
     return pd.DataFrame(rows)
 
 
@@ -251,19 +304,34 @@ def validate_outputs(outputs: FactorTestOutputs, quantile_groups: int, min_ic_pa
         raise ValueError("The final signal period was not explicitly excluded.")
     if (~members["test_eligible"]).any() or members["quantile"].lt(1).any() or members["quantile"].gt(quantile_groups).any():
         raise ValueError("Quantile membership contains an ineligible or invalid row.")
-    if groups.duplicated(["factor", "signal_date", "quantile"]).any():
+    if groups.duplicated(["factor", "score_type", "signal_date", "quantile"]).any():
         raise ValueError("Quantile results have duplicate group keys.")
     if (ic["rank_ic"].notna() & ic["ic_pair_count"].lt(min_ic_pairs)).any():
         raise ValueError("Rank IC was calculated below the configured minimum sample size.")
+    if set(ic["score_type"]) != set(members["score_type"]):
+        raise ValueError("Every score type must appear in the IC series.")
 
 
 def render_report(outputs: FactorTestOutputs) -> str:
-    lines = ["# 因子有效性检验", "", "本报告检验因子分数对下一月收益的区分能力，不代表实际开盘成交后的策略收益。", "", "## 汇总", "", "| 因子 | 可检验股票记录 | 有效 IC 期数 | IC 均值 | IC 胜率 | 首日缺失 | 提前退出/数据截断 | 极端收益股票 | 空组 |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
-    for row in outputs.summary.itertuples(index=False):
-        mean = "—" if pd.isna(row.ic_mean) else f"{row.ic_mean:.4f}"
-        win = "—" if pd.isna(row.ic_win_rate) else f"{row.ic_win_rate:.4f}"
-        lines.append(f"| {row.factor} | {row.test_eligible_rows} | {row.ic_valid_periods} | {mean} | {win} | {row.missing_first_holding_day_rows} | {row.early_exit_or_data_cutoff_rows} | {row.extreme_return_stock_rows} | {row.empty_group_rows} |")
-    lines.extend(["", "## 口径限制", "", "- 2025-12-31 没有后续持有期数据，未进入分组收益或 IC。", "- Momentum 在 2014-09 至 2015-02 没有可用六个月历史价格，未进行分组或 IC。", "- PE 按交易日 `PE1TTM` 可用的既定口径处理；该限制仅在最终报告中说明。", ""])
+    lines = ["# 因子有效性检验", "", "本报告检验因子分数对下一月收益的区分能力，不代表实际开盘成交后的策略收益。", "",
+             "## 汇总", "", "| 因子 | 分数 | 可检验股票记录 | 有效 IC 期数 | IC 均值 | IC 标准差 | ICIR | IC t 值 | IC 胜率 | Q5-Q1 均值 | Q5-Q1 t 值 |",
+             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    order = {"raw": 0, "raw_neutral_sample": 1, "neutral": 2}
+    summary = outputs.summary.assign(_order=outputs.summary["score_type"].map(order)).sort_values(["_order", "factor"])
+    for row in summary.itertuples(index=False):
+        def fmt(value: float) -> str:
+            return "—" if pd.isna(value) else f"{value:.4f}"
+        lines.append(
+            f"| {row.factor} | {row.score_type} | {row.test_eligible_rows} | {row.ic_valid_periods} | "
+            f"{fmt(row.ic_mean)} | {fmt(row.ic_std)} | {fmt(row.ic_ir)} | {fmt(row.ic_t)} | "
+            f"{fmt(row.ic_win_rate)} | {fmt(row.spread_mean)} | {fmt(row.spread_t)} |"
+        )
+    if "neutral" in set(outputs.summary["score_type"]):
+        lines.extend(["", "`raw` 为全样本原始分数，`raw_neutral_sample` 为同一批中性化可评估样本上的原始分数，"
+                      "`neutral` 为行业与市值中性化后的分数。三者的差值才是中性化本身的效应。", ""])
+    lines.extend(["", "## 口径限制", "", "- 2025-12-31 没有后续持有期数据，未进入分组收益或 IC。",
+                  "- Momentum 在 2014-09 至 2015-02 没有可用六个月历史价格，未进行分组或 IC。",
+                  "- PE 按交易日 `PE1TTM` 可用的既定口径处理；该限制仅在最终报告中说明。", ""])
     return "\n".join(lines)
 
 
@@ -271,7 +339,11 @@ def run(config: FactorTestConfig) -> FactorTestOutputs:
     directory = config.processed_dir
     factor_details = pd.read_parquet(directory / "factor_details.parquet")
     forward = build_forward_returns_streaming(factor_details, directory / "daily_trading.parquet")
-    details = build_factor_test_details(factor_details, forward, config.quantile_groups)
+    frames = [
+        build_factor_test_details(factor_details, forward, config.quantile_groups, score_type, score_suffix, eligibility_suffix)
+        for score_type, score_suffix, eligibility_suffix in available_score_types(factor_details)
+    ]
+    details = pd.concat(frames, ignore_index=True)
     members, quantile_returns = build_quantile_returns(details, config.quantile_groups)
     ic_series = build_ic_series(details, config.min_ic_pairs)
     summary = build_summary(details, quantile_returns, ic_series)
