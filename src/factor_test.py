@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import yaml
 
 FACTORS = ("pe", "momentum", "roe")
+MIN_T_STAT_ROWS = 3
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class FactorTestConfig:
     processed_dir: Path
     quantile_groups: int
     min_ic_pairs: int
+    subperiods: tuple[tuple[str, pd.Timestamp, pd.Timestamp], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,22 @@ class FactorTestOutputs:
     quantile_returns: pd.DataFrame
     ic_series: pd.DataFrame
     summary: pd.DataFrame
+    subperiods: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+
+def parse_subperiods(raw: object) -> tuple[tuple[str, pd.Timestamp, pd.Timestamp], ...]:
+    """Read the configured sub-periods and reject overlaps or mixed-up order."""
+    entries = tuple(
+        (str(item["name"]), pd.Timestamp(item["start"]), pd.Timestamp(item["end"]))
+        for item in (raw or [])
+    )
+    for name, start, end in entries:
+        if start > end:
+            raise ValueError(f"Sub-period {name} starts after it ends.")
+    for previous, following in zip(entries, entries[1:]):
+        if following[1] <= previous[2]:
+            raise ValueError(f"Sub-period {following[0]} overlaps {previous[0]}.")
+    return entries
 
 
 def load_factor_test_config(config_path: Path) -> FactorTestConfig:
@@ -40,6 +58,7 @@ def load_factor_test_config(config_path: Path) -> FactorTestConfig:
         processed_dir=root / settings["data"]["processed_dir"],
         quantile_groups=int(settings["factors"]["quantile_groups"]),
         min_ic_pairs=int(settings["factor_test"]["min_ic_pairs"]),
+        subperiods=parse_subperiods(settings["factor_test"].get("subperiods")),
     )
 
 
@@ -252,17 +271,39 @@ def build_ic_series(details: pd.DataFrame, min_ic_pairs: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _mean_ir_t(values: pd.Series) -> tuple[float | pd.NA, float | pd.NA, float | pd.NA]:
-    """Mean, information ratio, and t statistic of a monthly series."""
+def newey_west_lags(count: int) -> int:
+    """Newey-West (1994) automatic bandwidth: floor(4 * (T/100)^(2/9))."""
+    return max(1, int(np.floor(4 * (count / 100) ** (2 / 9))))
+
+
+def newey_west_t(values: pd.Series, lags: int | None = None) -> float:
+    """t statistic of the mean with a Bartlett-weighted long-run variance."""
+    clean = values.dropna().to_numpy(dtype=float)
+    count = clean.size
+    if count < MIN_T_STAT_ROWS:
+        return np.nan
+    bandwidth = min(newey_west_lags(count) if lags is None else int(lags), count - 1)
+    centered = clean - clean.mean()
+    long_run = float((centered ** 2).sum() / count)
+    for lag in range(1, bandwidth + 1):
+        covariance = float((centered[lag:] * centered[:-lag]).sum() / count)
+        long_run += 2 * (1 - lag / (bandwidth + 1)) * covariance
+    if long_run <= 0:
+        return np.nan
+    return float(clean.mean() / np.sqrt(long_run / count))
+
+
+def _mean_ir_t(values: pd.Series) -> tuple[float | pd.NA, float | pd.NA, float | pd.NA, float | pd.NA]:
+    """Mean, information ratio, plain t, and Newey-West t of a monthly series."""
     clean = values.dropna()
     if len(clean) < 2:
-        return pd.NA, pd.NA, pd.NA
+        return pd.NA, pd.NA, pd.NA, pd.NA
     mean = float(clean.mean())
     spread = float(clean.std(ddof=1))
     if spread == 0:
-        return mean, pd.NA, pd.NA
+        return mean, pd.NA, pd.NA, pd.NA
     ratio = mean / spread
-    return mean, ratio, ratio * np.sqrt(len(clean))
+    return mean, ratio, ratio * np.sqrt(len(clean)), newey_west_t(clean)
 
 
 def build_summary(details: pd.DataFrame, quantile_returns: pd.DataFrame, ic_series: pd.DataFrame) -> pd.DataFrame:
@@ -273,8 +314,8 @@ def build_summary(details: pd.DataFrame, quantile_returns: pd.DataFrame, ic_seri
             quantile_returns["factor"].eq(factor) & quantile_returns["score_type"].eq(score_type)
         ]
         spread = groups.loc[groups["quantile"].eq(1), ["signal_date", "q_high_minus_q_low"]].drop_duplicates()
-        ic_mean, ic_ir, ic_t = _mean_ir_t(ic)
-        spread_mean, _, spread_t = _mean_ir_t(spread["q_high_minus_q_low"])
+        ic_mean, ic_ir, ic_t, ic_t_nw = _mean_ir_t(ic)
+        spread_mean, _, spread_t, spread_t_nw = _mean_ir_t(spread["q_high_minus_q_low"])
         rows.append({
             "factor": factor, "score_type": score_type,
             "signal_periods": int(item["signal_date"].nunique()),
@@ -286,10 +327,44 @@ def build_summary(details: pd.DataFrame, quantile_returns: pd.DataFrame, ic_seri
             "empty_group_rows": int(groups["empty_group"].sum()),
             "ic_valid_periods": int(ic.notna().sum()),
             "ic_mean": ic_mean, "ic_std": float(ic.std(ddof=1)) if ic.notna().sum() > 1 else pd.NA,
-            "ic_ir": ic_ir, "ic_t": ic_t,
+            "ic_ir": ic_ir, "ic_t": ic_t, "ic_t_nw": ic_t_nw,
+            "nw_lags": newey_west_lags(int(ic.notna().sum())) if ic.notna().sum() else pd.NA,
             "ic_win_rate": ic.gt(0).mean() if ic.notna().any() else pd.NA,
-            "spread_mean": spread_mean, "spread_t": spread_t,
+            "spread_mean": spread_mean, "spread_t": spread_t, "spread_t_nw": spread_t_nw,
         })
+    return pd.DataFrame(rows)
+
+
+def build_subperiod_table(quantile_returns: pd.DataFrame, ic_series: pd.DataFrame,
+                          subperiods: tuple[tuple[str, pd.Timestamp, pd.Timestamp], ...]) -> pd.DataFrame:
+    """Repeat the IC and spread statistics inside each configured regime."""
+    if not subperiods:
+        return pd.DataFrame()
+    spread_all = (
+        quantile_returns.loc[quantile_returns["quantile"].eq(1),
+                            ["factor", "score_type", "signal_date", "q_high_minus_q_low"]]
+        .drop_duplicates(["factor", "score_type", "signal_date"])
+    )
+    rows = []
+    for (factor, score_type), ic_group in ic_series.groupby(["factor", "score_type"], sort=True):
+        spread_group = spread_all.loc[
+            spread_all["factor"].eq(factor) & spread_all["score_type"].eq(score_type)
+        ]
+        for name, start, end in subperiods:
+            ic_slice = ic_group.loc[ic_group["signal_date"].between(start, end), "rank_ic"]
+            spread_slice = spread_group.loc[
+                spread_group["signal_date"].between(start, end), "q_high_minus_q_low"
+            ]
+            ic_mean, ic_ir, _, ic_t_nw = _mean_ir_t(ic_slice)
+            spread_mean, _, _, spread_t_nw = _mean_ir_t(spread_slice)
+            rows.append({
+                "factor": factor, "score_type": score_type, "period": name,
+                "start": start, "end": end,
+                "periods": int(ic_slice.notna().sum()),
+                "ic_mean": ic_mean, "ic_ir": ic_ir, "ic_t_nw": ic_t_nw,
+                "ic_win_rate": ic_slice.gt(0).mean() if ic_slice.notna().any() else pd.NA,
+                "spread_mean": spread_mean, "spread_t_nw": spread_t_nw,
+            })
     return pd.DataFrame(rows)
 
 
@@ -310,25 +385,46 @@ def validate_outputs(outputs: FactorTestOutputs, quantile_groups: int, min_ic_pa
         raise ValueError("Rank IC was calculated below the configured minimum sample size.")
     if set(ic["score_type"]) != set(members["score_type"]):
         raise ValueError("Every score type must appear in the IC series.")
+    if not outputs.subperiods.empty:
+        if outputs.subperiods.duplicated(["factor", "score_type", "period"]).any():
+            raise ValueError("Sub-period table contains duplicate rows.")
+        totals = outputs.subperiods.groupby(["factor", "score_type"])["periods"].sum()
+        expected = outputs.summary.set_index(["factor", "score_type"])["ic_valid_periods"]
+        if not totals.reindex(expected.index).fillna(0).eq(expected).all():
+            raise ValueError("Sub-period counts do not add up to the overall IC periods.")
 
 
 def render_report(outputs: FactorTestOutputs) -> str:
     lines = ["# 因子有效性检验", "", "本报告检验因子分数对下一月收益的区分能力，不代表实际开盘成交后的策略收益。", "",
-             "## 汇总", "", "| 因子 | 分数 | 可检验股票记录 | 有效 IC 期数 | IC 均值 | IC 标准差 | ICIR | IC t 值 | IC 胜率 | Q5-Q1 均值 | Q5-Q1 t 值 |",
-             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+             "## 汇总", "", "| 因子 | 分数 | 有效 IC 期数 | IC 均值 | IC 标准差 | ICIR | IC t 值 | IC t 值（NW） | IC 胜率 | Q5-Q1 均值 | Q5-Q1 t 值（NW） | NW 阶数 |",
+             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     order = {"raw": 0, "raw_neutral_sample": 1, "neutral": 2}
     summary = outputs.summary.assign(_order=outputs.summary["score_type"].map(order)).sort_values(["_order", "factor"])
     for row in summary.itertuples(index=False):
         def fmt(value: float) -> str:
             return "—" if pd.isna(value) else f"{value:.4f}"
         lines.append(
-            f"| {row.factor} | {row.score_type} | {row.test_eligible_rows} | {row.ic_valid_periods} | "
-            f"{fmt(row.ic_mean)} | {fmt(row.ic_std)} | {fmt(row.ic_ir)} | {fmt(row.ic_t)} | "
-            f"{fmt(row.ic_win_rate)} | {fmt(row.spread_mean)} | {fmt(row.spread_t)} |"
+            f"| {row.factor} | {row.score_type} | {row.ic_valid_periods} | "
+            f"{fmt(row.ic_mean)} | {fmt(row.ic_std)} | {fmt(row.ic_ir)} | {fmt(row.ic_t)} | {fmt(row.ic_t_nw)} | "
+            f"{fmt(row.ic_win_rate)} | {fmt(row.spread_mean)} | {fmt(row.spread_t_nw)} | {row.nw_lags} |"
         )
     if "neutral" in set(outputs.summary["score_type"]):
         lines.extend(["", "`raw` 为全样本原始分数，`raw_neutral_sample` 为同一批中性化可评估样本上的原始分数，"
-                      "`neutral` 为行业与市值中性化后的分数。三者的差值才是中性化本身的效应。", ""])
+                      "`neutral` 为行业与市值中性化后的分数。三者的差值才是中性化本身的效应。",
+                      "`t 值（NW）` 用 Bartlett 核的 long-run 方差，带宽按 Newey-West 自动规则取 4×(T/100)^(2/9)，"
+                      "与普通 t 值并列以便看出序列相关的影响。", ""])
+    if not outputs.subperiods.empty:
+        lines.extend(["", "## 子区间稳定性", "",
+                      "| 因子 | 分数 | 区间 | 期数 | IC 均值 | IC t 值（NW） | ICIR | IC 胜率 | Q5-Q1 均值 | Q5-Q1 t 值（NW） |",
+                      "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"])
+        for row in outputs.subperiods.itertuples(index=False):
+            def fmt_period(value: float) -> str:
+                return "—" if pd.isna(value) else f"{value:.4f}"
+            lines.append(
+                f"| {row.factor} | {row.score_type} | {row.period} | {row.periods} | "
+                f"{fmt_period(row.ic_mean)} | {fmt_period(row.ic_t_nw)} | {fmt_period(row.ic_ir)} | "
+                f"{fmt_period(row.ic_win_rate)} | {fmt_period(row.spread_mean)} | {fmt_period(row.spread_t_nw)} |"
+            )
     lines.extend(["", "## 口径限制", "", "- 2025-12-31 没有后续持有期数据，未进入分组收益或 IC。",
                   "- Momentum 在 2014-09 至 2015-02 没有可用六个月历史价格，未进行分组或 IC。",
                   "- PE 按交易日 `PE1TTM` 可用的既定口径处理；该限制仅在最终报告中说明。", ""])
@@ -347,7 +443,8 @@ def run(config: FactorTestConfig) -> FactorTestOutputs:
     members, quantile_returns = build_quantile_returns(details, config.quantile_groups)
     ic_series = build_ic_series(details, config.min_ic_pairs)
     summary = build_summary(details, quantile_returns, ic_series)
-    outputs = FactorTestOutputs(forward, details, members, quantile_returns, ic_series, summary)
+    subperiods = build_subperiod_table(quantile_returns, ic_series, config.subperiods)
+    outputs = FactorTestOutputs(forward, details, members, quantile_returns, ic_series, summary, subperiods)
     validate_outputs(outputs, config.quantile_groups, config.min_ic_pairs)
     forward.to_parquet(directory / "factor_forward_returns.parquet", index=False)
     details.to_parquet(directory / "factor_test_details.parquet", index=False)
@@ -355,6 +452,8 @@ def run(config: FactorTestConfig) -> FactorTestOutputs:
     quantile_returns.to_csv(directory / "factor_quantile_returns.csv", index=False, encoding="utf-8-sig")
     ic_series.to_csv(directory / "factor_ic_series.csv", index=False, encoding="utf-8-sig")
     summary.to_csv(directory / "factor_test_summary.csv", index=False, encoding="utf-8-sig")
+    if not subperiods.empty:
+        subperiods.to_csv(directory / "factor_subperiods.csv", index=False, encoding="utf-8-sig")
     report_dir = directory.parent.parent / "reports" / "generated"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "factor-test.md").write_text(render_report(outputs), encoding="utf-8")

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -83,3 +84,101 @@ def test_rank_ic_requires_minimum_pairs_and_reports_positive_win() -> None:
     enough = pd.concat([small, small.assign(signal_date=pd.Timestamp("2021-02-26"))], ignore_index=True)
     result = build_ic_series(enough, 3)
     assert result["rank_ic"].dropna().eq(1).all()
+
+def test_newey_west_lags_follows_the_sample_size() -> None:
+    from src.factor_test import newey_west_lags
+
+    assert newey_west_lags(28) == 3
+    assert newey_west_lags(135) == 4
+    assert newey_west_lags(1000) == 6
+
+
+def test_newey_west_matches_the_plain_t_on_white_noise() -> None:
+    from src.factor_test import newey_west_t
+
+    rng = np.random.default_rng(20260930)
+    values = pd.Series(rng.normal(0.02, 0.1, 600))
+    plain = values.mean() / values.std(ddof=1) * np.sqrt(len(values))
+    assert newey_west_t(values) == pytest.approx(plain, rel=0.1)
+
+
+def test_newey_west_shrinks_the_t_statistic_under_positive_autocorrelation() -> None:
+    from src.factor_test import newey_west_t
+
+    rng = np.random.default_rng(11)
+    shocks = rng.normal(0.0, 0.1, 800)
+    values = np.zeros_like(shocks)
+    for index in range(1, shocks.size):
+        values[index] = 0.6 * values[index - 1] + shocks[index]
+    series = pd.Series(values + 0.01)
+    plain = abs(series.mean() / series.std(ddof=1) * np.sqrt(len(series)))
+    assert 0 < abs(newey_west_t(series)) < plain
+
+
+def test_newey_west_returns_nan_when_the_variance_is_degenerate() -> None:
+    from src.factor_test import newey_west_t
+
+    assert pd.isna(newey_west_t(pd.Series([0.05, 0.05, 0.05, 0.05])))
+    assert pd.isna(newey_west_t(pd.Series([0.01, 0.02])))
+
+
+def _subperiod_frames() -> tuple[pd.DataFrame, pd.DataFrame, list]:
+    dates = pd.date_range("2021-01-31", periods=12, freq="ME")
+    ic = pd.DataFrame({
+        "factor": "pe", "score_type": "raw", "signal_date": dates,
+        "rank_ic": np.linspace(-0.1, 0.1, 12),
+    })
+    quantiles = pd.DataFrame({
+        "factor": "pe", "score_type": "raw", "signal_date": dates,
+        "quantile": 1, "q_high_minus_q_low": np.linspace(-0.02, 0.02, 12),
+    })
+    bounds = [
+        ("Q1", pd.Timestamp("2021-01-01"), pd.Timestamp("2021-04-30")),
+        ("Q2", pd.Timestamp("2021-05-01"), pd.Timestamp("2021-08-31")),
+        ("Q3", pd.Timestamp("2021-09-01"), pd.Timestamp("2021-12-31")),
+    ]
+    return ic, quantiles, bounds
+
+
+def test_subperiods_partition_the_sample() -> None:
+    from src.factor_test import build_subperiod_table
+
+    ic, quantiles, bounds = _subperiod_frames()
+    table = build_subperiod_table(quantiles, ic, tuple(bounds))
+    assert table["periods"].sum() == 12
+    assert table["periods"].tolist() == [4, 4, 4]
+
+
+def test_subperiod_bounds_are_inclusive() -> None:
+    from src.factor_test import build_subperiod_table
+
+    ic, quantiles, _ = _subperiod_frames()
+    bounds = (("only", pd.Timestamp("2021-01-31"), pd.Timestamp("2021-04-30")),)
+    table = build_subperiod_table(quantiles, ic, bounds)
+    assert table["periods"].tolist() == [4]
+
+
+def test_summary_reports_newey_west_columns() -> None:
+    from src.factor_test import build_summary
+
+    details = pd.DataFrame({
+        "factor": ["pe"] * 4, "score_type": ["raw"] * 4,
+        "signal_date": pd.date_range("2021-01-31", periods=4, freq="ME"),
+        "test_eligible": [True] * 4,
+        "test_unavailable_reason": pd.Series([pd.NA] * 4, dtype="string"),
+        "early_exit_or_data_cutoff": [False] * 4,
+        "extreme_return_days": [0] * 4,
+    })
+    ic = pd.DataFrame({
+        "factor": "pe", "score_type": "raw",
+        "signal_date": details["signal_date"], "rank_ic": [0.05, 0.02, 0.08, 0.03],
+    })
+    quantiles = pd.DataFrame({
+        "factor": "pe", "score_type": "raw", "signal_date": details["signal_date"],
+        "quantile": 1, "q_high_minus_q_low": [0.01, 0.0, 0.02, 0.005], "empty_group": False,
+    })
+    summary = build_summary(details, quantiles, ic)
+    row = summary.iloc[0]
+    assert {"ic_t_nw", "spread_t_nw", "nw_lags"} <= set(summary.columns)
+    assert pd.notna(row["ic_t_nw"]) and pd.notna(row["spread_t_nw"])
+    assert row["nw_lags"] >= 1

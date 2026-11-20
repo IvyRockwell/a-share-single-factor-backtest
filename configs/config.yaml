@@ -35,6 +35,12 @@ factor_test:
   future_return_end: next_signal_date_close
   min_ic_pairs: 50
   retain_extreme_returns: true
+  # 子区间按 A 股风格划分，需覆盖整个样本且互不重叠。
+  subperiods:
+    - { name: 2014-2016, start: 2014-09-01, end: 2016-12-31 }
+    - { name: 2017-2019, start: 2017-01-01, end: 2019-12-31 }
+    - { name: 2020-2022, start: 2020-01-01, end: 2022-12-31 }
+    - { name: 2023-2025, start: 2023-01-01, end: 2025-12-31 }
 
 portfolio:
   rebalance_frequency: monthly

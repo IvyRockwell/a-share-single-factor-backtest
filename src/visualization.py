@@ -439,7 +439,7 @@ def plot_neutralization(inputs: FigureInputs, output: Path) -> None:
                 continue
             labels.append(label)
             values.append(float(row["ic_mean"].iloc[0]))
-            t_value = row["ic_t"].iloc[0]
+            t_value = row["ic_t_nw"].iloc[0]
             t_values.append(float(t_value) if pd.notna(t_value) else np.nan)
         positions = np.arange(len(values))
         axis.bar(positions, values, color=FACTOR_COLORS[factor], alpha=0.85, width=0.6)
@@ -452,8 +452,8 @@ def plot_neutralization(inputs: FigureInputs, output: Path) -> None:
             text = f"{value:.4f}\nt={t_value:.1f}" if np.isfinite(t_value) else f"{value:.4f}"
             axis.annotate(text, (position, value), textcoords="offset points",
                           xytext=(0, 6 if value >= 0 else -18), ha="center", fontsize=8)
-    fig.suptitle("中性化前后：平均 Rank IC 与 t 值", fontsize=15)
-    _footer(fig, "来源：factor_test_summary.csv｜2014-09-30—2025-11-28｜同子样本 = 在与中性化相同的样本上重算原始 IC｜IC 为月度 Spearman 相关")
+    fig.suptitle("中性化前后：平均 Rank IC 与 Newey-West t 值", fontsize=15)
+    _footer(fig, "来源：factor_test_summary.csv｜2014-09-30—2025-11-28｜同子样本 = 在与中性化相同的样本上重算原始 IC｜t 值为 Bartlett 核的 NW 修正")
     fig.tight_layout(rect=(0, 0.05, 1, 0.92))
     _save(fig, output)
 
