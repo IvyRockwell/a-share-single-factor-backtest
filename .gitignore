@@ -23,6 +23,7 @@ desktop.ini
 .vscode/
 *.log
 
-# Local CSMAR exports, regenerated standard data, and downstream stage artifacts
+# Local CSMAR exports, regenerated standard data, and pipeline artifacts
 项目初始数据/
 data/processed/
+reports/generated/
