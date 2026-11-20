@@ -7,16 +7,24 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import yaml
+
+FACTORS = ("pe", "momentum", "roe")
+MIN_NEUTRAL_ROWS = 100
 
 
 @dataclass(frozen=True)
 class FactorConfig:
-    """Locations and the confirmed six-calendar-month Momentum window."""
+    """Locations, the Momentum window, and the neutralization controls."""
 
     processed_dir: Path
     momentum_lookback_months: int
+    neutralize: bool = True
+    industry_standard: str = "P0207"
+    min_group_size: int = 20
+    min_industry_coverage: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -29,9 +37,14 @@ def load_factor_config(config_path: Path) -> FactorConfig:
     with config_path.open(encoding="utf-8") as handle:
         settings = yaml.safe_load(handle)
     root = config_path.parent.parent
+    neutralization = settings.get("neutralization") or {}
     return FactorConfig(
         processed_dir=root / settings["data"]["processed_dir"],
         momentum_lookback_months=int(settings["factors"]["momentum_lookback_months"]),
+        neutralize=bool(neutralization.get("enabled", True)),
+        industry_standard=str(neutralization.get("industry_standard", "P0207")),
+        min_group_size=int(neutralization.get("min_group_size", 20)),
+        min_industry_coverage=float(neutralization.get("min_industry_coverage", 0.8)),
     )
 
 
@@ -147,14 +160,125 @@ def add_roe_factor(pool: pd.DataFrame, financials: pd.DataFrame) -> pd.DataFrame
     return result
 
 
+def attach_exposures(result: pd.DataFrame, market_cap: pd.DataFrame, industry: pd.DataFrame | None,
+                     industry_standard: str) -> pd.DataFrame:
+    """Attach the size control and, when present, the industry effective on the signal date."""
+    columns = ["signal_date", "stock_code", "market_cap", "log_market_cap", "has_market_cap"]
+    frame = result.merge(market_cap[columns], on=["signal_date", "stock_code"], how="left", validate="one_to_one")
+    frame["industry_code"] = pd.Series(pd.NA, index=frame.index, dtype="string")
+    if industry is None or industry.empty:
+        return frame
+    selected = industry.loc[
+        industry["industry_standard"].eq(industry_standard), ["stock_code", "effective_date", "industry_code"]
+    ]
+    if selected.empty:
+        return frame
+    right = selected.assign(
+        effective_date=lambda item: pd.to_datetime(item["effective_date"]).astype("datetime64[ns]")
+    ).sort_values("effective_date")
+    left = frame.drop(columns="industry_code").assign(
+        signal_date=lambda item: pd.to_datetime(item["signal_date"]).astype("datetime64[ns]")
+    )
+    merged = pd.merge_asof(
+        left, right,
+        left_on="signal_date", right_on="effective_date", by="stock_code", direction="backward",
+    )
+    return merged.drop(columns="effective_date")
+
+
+def _residual_rank(period: pd.DataFrame, score_column: str, use_industry: bool,
+                   min_group_size: int) -> tuple[pd.Series, pd.Series]:
+    """Regress the score on log size and industry dummies, then rank the residual."""
+    score = period[score_column].astype("Float64").astype("float64")
+    size = period["log_market_cap"].astype("Float64").astype("float64")
+    usable = score.notna() & size.notna()
+    if use_industry:
+        usable = usable & period["industry_code"].notna()
+    ranked = pd.Series(np.nan, index=period.index, dtype="float64")
+    if int(usable.sum()) < MIN_NEUTRAL_ROWS:
+        return ranked, pd.Series(False, index=period.index)
+
+    target = score.loc[usable]
+    spread = float(target.std(ddof=0))
+    target = (target - target.mean()) / spread if spread > 0 else target * 0.0
+    blocks = [np.ones((usable.sum(), 1)), size.loc[usable].to_numpy().reshape(-1, 1)]
+    if use_industry:
+        codes = period.loc[usable, "industry_code"].astype(str)
+        counts = codes.value_counts()
+        codes = codes.where(~codes.isin(counts[counts < min_group_size].index), "OTHER")
+        dummies = pd.get_dummies(codes, drop_first=True, dtype="float64")
+        if dummies.shape[1]:
+            blocks.append(dummies.to_numpy())
+    design = np.hstack(blocks)
+    beta, *_ = np.linalg.lstsq(design, target.to_numpy(), rcond=None)
+    residual = target.to_numpy() - design @ beta
+    values = pd.Series(residual).rank(method="average").to_numpy()
+    ranked.loc[usable] = values / len(values)
+    return ranked, pd.Series(usable, index=period.index)
+
+
+def neutralize_scores(details: pd.DataFrame, use_industry: bool, min_group_size: int,
+                      control_set: str) -> pd.DataFrame:
+    """Add a neutralized score for each factor, one cross-section at a time."""
+    result = details.copy()
+    result["neutral_control"] = control_set
+    for factor in FACTORS:
+        neutral = pd.Series(np.nan, index=result.index, dtype="float64")
+        eligible = pd.Series(False, index=result.index)
+        for _, period in result.groupby("signal_date", sort=False):
+            values, usable = _residual_rank(period, f"{factor}_score", use_industry, min_group_size)
+            neutral.loc[period.index] = values
+            eligible.loc[period.index] = usable
+        result[f"{factor}_score_neutral"] = neutral
+        result[f"{factor}_neutral_eligible"] = eligible
+    return result
+
+
+def build_neutralization_summary(details: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for signal_date, period in details.groupby("signal_date", sort=True):
+        row = {
+            "signal_date": signal_date,
+            "control_set": period["neutral_control"].iloc[0],
+            "pool_count": len(period),
+            "size_coverage": float(period["log_market_cap"].notna().mean()),
+            "industry_coverage": float(period["industry_code"].notna().mean()),
+        }
+        for factor in FACTORS:
+            row[f"{factor}_neutral_count"] = int(period[f"{factor}_neutral_eligible"].sum())
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def build_factor_details(pool: pd.DataFrame, valuation: pd.DataFrame, daily: pd.DataFrame,
-                         financials: pd.DataFrame, config: FactorConfig) -> pd.DataFrame:
+                         financials: pd.DataFrame, config: FactorConfig,
+                         market_cap: pd.DataFrame | None = None,
+                         industry: pd.DataFrame | None = None) -> pd.DataFrame:
     """Compute each factor independently for every pool row."""
     if pool.duplicated(["signal_date", "stock_code"]).any():
         raise ValueError("Historical universe contains duplicate (signal_date, stock_code) keys.")
+    # Parquet round-trips can hand back microsecond resolution, which merge_asof refuses to mix.
+    pool = pool.assign(signal_date=pd.to_datetime(pool["signal_date"]).astype("datetime64[ns]"))
+    daily = daily.assign(trade_date=pd.to_datetime(daily["trade_date"]).astype("datetime64[ns]"))
+    financials = financials.assign(
+        report_date=pd.to_datetime(financials["report_date"]).astype("datetime64[ns]"),
+        actual_disclosure_date=pd.to_datetime(financials["actual_disclosure_date"]).astype("datetime64[ns]"),
+    )
+    if market_cap is not None:
+        market_cap = market_cap.assign(signal_date=pd.to_datetime(market_cap["signal_date"]).astype("datetime64[ns]"))
+    if industry is not None:
+        industry = industry.assign(effective_date=pd.to_datetime(industry["effective_date"]).astype("datetime64[ns]"))
     result = add_pe_factor(pool[["signal_date", "stock_code"]].copy(), valuation)
     result = add_momentum_factor(result, daily, config.momentum_lookback_months)
-    return add_roe_factor(result, financials).sort_values(["signal_date", "stock_code"]).reset_index(drop=True)
+    result = add_roe_factor(result, financials)
+    if market_cap is not None:
+        result = attach_exposures(result, market_cap, industry, config.industry_standard)
+        coverage = float(result["industry_code"].notna().mean())
+        use_industry = config.neutralize and coverage >= config.min_industry_coverage
+        if config.neutralize:
+            control_set = f"industry({config.industry_standard})+size" if use_industry else "size"
+            result = neutralize_scores(result, use_industry, config.min_group_size, control_set)
+    return result.sort_values(["signal_date", "stock_code"]).reset_index(drop=True)
 
 
 FACTOR_COLUMNS = {
@@ -201,6 +325,13 @@ def validate_outputs(outputs: FactorOutputs, pool: pd.DataFrame) -> None:
     expected = len(pool["signal_date"].unique()) * len(FACTOR_COLUMNS)
     if len(quality) != expected or (quality["pool_count"] != quality["rankable_count"] + quality["unrankable_count"]).any():
         raise ValueError("Factor quality summary does not reconcile to the detail output.")
+    if "neutral_control" in details:
+        for factor in FACTORS:
+            neutral, eligible = details[f"{factor}_score_neutral"], details[f"{factor}_neutral_eligible"]
+            if neutral[eligible].isna().any() or neutral[~eligible].notna().any():
+                raise ValueError(f"Neutral {factor} scores do not match their eligibility flag.")
+            if neutral[eligible].le(0).any() or neutral[eligible].gt(1).any():
+                raise ValueError(f"Neutral {factor} scores do not fall in (0, 1].")
     if (details.loc[details["momentum_is_rankable"], "momentum_start_date"] > details.loc[details["momentum_is_rankable"], "momentum_target_date"]).any():
         raise ValueError("Momentum used a price after its six-month lookback target date.")
     if (details.loc[details["roe_is_rankable"], "roe_actual_disclosure_date"] >= details.loc[details["roe_is_rankable"], "signal_date"]).any():
@@ -244,12 +375,20 @@ def run(config: FactorConfig) -> FactorOutputs:
         filters=[("trade_date", ">=", earliest_target), ("trade_date", "<=", pool["signal_date"].max())],
     )
     financials = pd.read_parquet(directory / "financial_availability.parquet")
-    details = build_factor_details(pool, valuation, daily, financials, config)
+    market_cap_path = directory / "market_cap.parquet"
+    market_cap = pd.read_parquet(market_cap_path) if market_cap_path.exists() else None
+    industry_path = directory / "industry.parquet"
+    industry = pd.read_parquet(industry_path, columns=["stock_code", "industry_standard", "effective_date", "industry_code"]) if industry_path.exists() else None
+    details = build_factor_details(pool, valuation, daily, financials, config, market_cap, industry)
     quality = build_quality_summary(details)
     outputs = FactorOutputs(details, quality)
     validate_outputs(outputs, pool)
     details.to_parquet(directory / "factor_details.parquet", index=False)
     quality.to_csv(directory / "factor_period_quality.csv", index=False, encoding="utf-8-sig")
+    if "neutral_control" in details:
+        summary = build_neutralization_summary(details)
+        summary.to_csv(directory / "neutralization_summary.csv", index=False, encoding="utf-8-sig")
+        print(f"Neutralization control set: {details['neutral_control'].iloc[0]}.")
     report_dir = directory.parent.parent / "reports" / "generated"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "factors.md").write_text(render_report(outputs), encoding="utf-8")

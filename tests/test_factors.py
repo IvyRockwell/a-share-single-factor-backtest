@@ -77,3 +77,28 @@ def test_quality_summary_reconciles_every_factor_independently() -> None:
     validate_outputs(FactorOutputs(details, quality), _pool())
     assert set(quality["factor"]) == {"pe", "momentum", "roe"}
     assert quality.loc[quality["factor"].eq("pe"), "positive_pe_max"].iloc[0] == 20
+
+def test_neutral_scores_drop_size_and_industry_exposure() -> None:
+    import numpy as np
+
+    from src.factors import neutralize_scores
+
+    rng = np.random.default_rng(7)
+    count = 600
+    industries = rng.choice(["A", "B", "C", "D"], count)
+    size = rng.normal(10.0, 1.5, count)
+    industry_effect = pd.Series(industries).map({"A": 0.2, "B": -0.1, "C": 0.0, "D": 0.3}).to_numpy()
+    raw = size * 0.8 + industry_effect + rng.normal(0.0, 0.5, count)
+    period = pd.DataFrame({
+        "signal_date": pd.Timestamp("2021-01-29"),
+        "stock_code": [f"{index:06d}" for index in range(count)],
+        "pe_score": raw, "momentum_score": raw, "roe_score": raw,
+        "log_market_cap": size, "industry_code": industries,
+    })
+
+    result = neutralize_scores(period, use_industry=True, min_group_size=5, control_set="industry+size")
+
+    neutral = result["pe_score_neutral"]
+    assert result["pe_neutral_eligible"].all()
+    assert abs(neutral.corr(pd.Series(size), method="spearman")) < 0.05
+    assert neutral.groupby(industries).mean().std() < 0.03

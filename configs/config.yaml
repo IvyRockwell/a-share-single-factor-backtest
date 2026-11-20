@@ -49,6 +49,13 @@ universe:
   min_listing_months: 6
   normal_trading_status: "1"
 
+neutralization:
+  # 中性化控制变量：log(总市值) + 行业哑变量。行业覆盖不足时自动降级为纯市值。
+  enabled: true
+  industry_standard: P0207   # 证监会2012版；申万2021版为 P0218
+  min_group_size: 20
+  min_industry_coverage: 0.80
+
 costs:
   # 成本假设。所有比例均按单边实际成交金额计算。
   commission_rate: 0.0003
