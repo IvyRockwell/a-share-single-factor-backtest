@@ -14,12 +14,16 @@
 | Momentum | -0.0236 | 39.53% | -74.23% | 25.76% | 2.13% | -62.32% | 0.211 |
 | ROE | 0.0065 | 48.89% | -43.26% | 117.99% | 7.44% | -53.71% | 0.419 |
 | H00300 | — | — | — | 141.94% | 8.48% | -46.06% | 0.483 |
+| 等权全 A | — | — | — | 193.90% | 10.44% | -61.91% | 0.486 |
+| 市值加权全 A | — | — | — | 143.30% | 8.54% | -48.43% | 0.476 |
 
 只有 PE 的分组、IC 与回测方向一致；Momentum 与预设方向相反，ROE 的横截面区分度接近零。加入 20 bp 滑点后三者净累计收益分别为 255.64%、-11.77%、105.49%。
 
+**超额里有多少是因子？** 组合是全 A 等权，市值加权全 A 与 HS300 几乎重合（8.54% vs 8.48%），而等权全 A 是 10.44%。所以 PE 相对 HS300 的 4.80 个百分点里约 1.96 是等权/小市值暴露，因子本身约 2.84。对行业与市值做中性化后，PE 的 IC 从 0.0501 **升到 0.0579**，ICIR 从 0.30 **升到 0.60**——低估值信号不是小盘股的伪装。
+
 ![三因子毛净值与 H00300](reports/figures/05_gross_nav_vs_benchmark.png)
 
-**但 PE 的超额不能全部归因于估值因子**：组合是全 A 等权，基准是市值加权的沪深 300，而不做任何筛选的中间分位（Q3）累计也有 213.48%。详见研究笔记 5.1 节。
+![中性化前后平均 Rank IC](reports/figures/14_neutralization_ic.png)
 
 ## 数据
 
@@ -31,6 +35,8 @@ CSMAR（国泰安）。原始导出需自行获取，放入项目根目录的 `�
 | `STK_MKT_ValuationMetrics` | 估值指标（`PE1TTM`） |
 | `FS_Comins` / `FS_Combas` / `IAR_Forecdt` | 利润表、资产负债表、实际披露日 |
 | `TRD_Co` / `STK_LISTEDCOINFOANL` / `STK_ITEMCHANGE` | 上市日、上市状态变更 |
+| `STK_CAPITAL` | 股本变动（总股数、流通股数） |
+| `STK_INDUSTRYCLASS` | 行业分类（证监会 2012 版） |
 | `TRD_Cale` | 交易日历 |
 | `IDX_Idxtrd` | 沪深 300 全收益（H00300） |
 
@@ -38,7 +44,9 @@ CSMAR（国泰安）。原始导出需自行获取，放入项目根目录的 `�
 
 - **股票池**：月末最后一个交易日构建，要求当日正常交易、上市满 6 个自然月、未处于暂停上市 / 退市整理 / 终止上市。状态按事件生效日判断，后来退市的股票在退市前仍留在池中，避免幸存者偏差。
 - **因子**：PE 取正值 `PE1TTM` 反向排名；Momentum 取不晚于 6 个自然月前的复权收盘价算区间收益；ROE 只取信号日前已实际披露的合并年报。
-- **检验**：五分位分组、下月收益、Spearman Rank IC、Q5-Q1。
+- **中性化**：每个信号日对 `log(市值)` 与证监会行业哑变量做 OLS，取残差重新排名；样本不足时自动降级为纯市值。
+- **基准**：H00300、等权全 A、市值加权全 A 三条，用来分离"基准错配"与"因子本身"。
+- **检验**：五分位分组、下月收益、Spearman Rank IC、Q5-Q1，并给出 IC 的 t 值、ICIR 与 Q5-Q1 的 t 值。
 - **组合**：Top 20% 等权、月度调仓、下一交易日开盘执行；先退出与减仓，再新建与加仓，现金不足时按比例缩减。
 - **成本**：佣金双边 3 bp，印花税卖出 10 bp（2023-08-28 起 5 bp），滑点 0 / 10 / 20 bp 三档情景。
 
@@ -48,16 +56,17 @@ CSMAR（国泰安）。原始导出需自行获取，放入项目根目录的 `�
 configs/config.yaml     全部参数与研究假设
 src/data_loader.py      原始 CSV → 标准化 parquet，附质量标记
 src/universe.py         历史股票池（point-in-time）
-src/factors.py          PE / Momentum / ROE
-src/factor_test.py      分组、未来收益、Rank IC
+src/market_cap.py       总股本 × 收盘价，逐月市值
+src/factors.py          PE / Momentum / ROE + 行业市值中性化
+src/factor_test.py      分组、未来收益、Rank IC 与 t 值
 src/portfolio.py        目标组合与调仓动作
 src/backtest.py         开盘成交、等权恢复、现金约束的逐日账本
 src/costs.py            佣金、印花税、滑点
-src/performance.py      收益、波动、回撤、Sharpe
+src/performance.py      收益、波动、回撤、Sharpe，三条基准
 src/robustness.py       参数与成本网格
 src/visualization.py    研究图表
 reports/research_note.md   研究笔记（定稿）
-reports/figures/           17 张图
+reports/figures/           18 张图
 notebooks/01_data_exploration.ipynb  原始数据探查
 tests/                     47 个用例（构造数据，不依赖原始数据）
 run.py                     命令行入口
@@ -69,7 +78,7 @@ run.py                     命令行入口
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-python run.py clean universe factors evaluate portfolio backtest costs performance robustness figures
+python run.py clean universe marketcap factors evaluate portfolio backtest costs performance robustness figures
 python run.py all          # 等价于按上面的顺序全部执行
 python -m pytest -q        # 不需要原始数据
 ```
@@ -79,10 +88,10 @@ python -m pytest -q        # 不需要原始数据
 ## 口径与已知限制
 
 - PE 按交易日 `PE1TTM` 可用处理，未自建 point-in-time 估值，不能表述为已严格消除前视偏差。
-- 未做行业与市值中性化，等权组合同市值加权基准比较时，超额里含有等权 / 小市值暴露。
-- 未过滤 ST / *ST；次新股门槛 6 个自然月；|日收益| > 100% 的记录保留不 winsorize。
+- 中性化用"总股本 × 收盘价"的市值，未做自由流通市值调整；行业为证监会 2012 版大类，按实施日逐月对齐。
+- 信号日按 `Trdsta=1` 已排除 ST/*ST，但持仓期内转为 ST 或长期停牌的不做单独处理；次新股门槛 6 个自然月；|日收益| > 100% 的记录保留不 winsorize。
 - 涨跌停、整手、最低佣金、盘口深度、资金容量未建模；现金收益为 0。
-- 只有点估计，没有 IC 的 t 值 / ICIR / 多空显著性检验，也没有样本外区间。
+- IC 的 t 值、ICIR 与 Q5-Q1 的 t 值已给出，但仍是单一样本、事后选定三个因子，没有样本外区间，也没有多重检验修正。
 - Sharpe 按 252 个交易日年化、无风险利率取 0，分子为日算术均值，表中年化收益为几何复利，两者口径不同。
 - 历史回测不能证明因果关系，也不代表未来收益。
 
