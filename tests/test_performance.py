@@ -17,8 +17,8 @@ def _config() -> PerformanceConfig:
 
 
 def _inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    stage7_rows: list[dict[str, object]] = []
-    stage8_rows: list[dict[str, object]] = []
+    gross_rows: list[dict[str, object]] = []
+    net_rows: list[dict[str, object]] = []
     cost_rows: list[dict[str, object]] = []
     gross_returns = np.array([-0.10, 0.20, 0.05])
     benchmark_returns = np.array([-0.20, 0.10, 0.02])
@@ -28,7 +28,7 @@ def _inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         for day, gross_return, nav, benchmark_return, benchmark_value in zip(
             DATES, gross_returns, gross_nav, benchmark_returns, benchmark_nav
         ):
-            stage7_rows.append({
+            gross_rows.append({
                 "factor": factor,
                 "trade_date": day,
                 "gross_return": gross_return,
@@ -45,7 +45,7 @@ def _inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             )):
                 transaction_cost = (scenario + 3) / 10_000 if index == 0 else 0.0
                 turnover = 1.0 if index == 0 else 0.0
-                stage8_rows.append({
+                net_rows.append({
                     "factor": factor,
                     "trade_date": day,
                     "slippage_bp": scenario,
@@ -65,7 +65,7 @@ def _inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
                 "turnover": 1.0,
                 "total_transaction_cost": (scenario + 3) / 10_000,
             })
-    return pd.DataFrame(stage7_rows), pd.DataFrame(stage8_rows), pd.DataFrame(cost_rows)
+    return pd.DataFrame(gross_rows), pd.DataFrame(net_rows), pd.DataFrame(cost_rows)
 
 
 def test_metrics_use_confirmed_daily_formulas_and_initial_nav_drawdown() -> None:
@@ -95,7 +95,7 @@ def test_outputs_keep_gross_net_and_benchmark_cost_meanings_separate() -> None:
 
 
 def test_mismatched_strategy_dates_are_rejected() -> None:
-    stage7, stage8, costs = _inputs()
-    stage7 = stage7.loc[~(stage7["factor"].eq("roe") & stage7["trade_date"].eq(DATES[-1]))]
+    gross_df, net_df, costs = _inputs()
+    gross_df = gross_df.loc[~(gross_df["factor"].eq("roe") & gross_df["trade_date"].eq(DATES[-1]))]
     with pytest.raises(ValueError, match="date ranges are not identical"):
-        build_performance_outputs(stage7, stage8, costs, _config())
+        build_performance_outputs(gross_df, net_df, costs, _config())

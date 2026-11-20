@@ -37,7 +37,7 @@ class UniverseOutputs:
 
 
 def load_universe_config(config_path: Path) -> UniverseConfig:
-    """Load Stage 3 parameters recorded in the project configuration."""
+    """Load the universe parameters from the project configuration."""
     with config_path.open(encoding="utf-8") as handle:
         settings = yaml.safe_load(handle)
     root = config_path.parent.parent
@@ -119,7 +119,7 @@ def _exclusion_reasons(frame: pd.DataFrame, config: UniverseConfig) -> pd.Series
 
 def build_historical_universe(daily_trading: pd.DataFrame, listings: pd.DataFrame, status_changes: pd.DataFrame,
                               calendar: pd.DataFrame, config: UniverseConfig) -> UniverseOutputs:
-    """Apply the confirmed Stage 3 rules to produce point-in-time pool snapshots."""
+    """Apply the universe rules to produce point-in-time pool snapshots."""
     signal_dates = monthly_signal_dates(calendar, config)
     panel = (
         pd.DataFrame({"signal_date": signal_dates}).merge(first_listing_dates(listings), how="cross")
@@ -154,7 +154,7 @@ def build_historical_universe(daily_trading: pd.DataFrame, listings: pd.DataFram
 
 
 def validate_outputs(outputs: UniverseOutputs) -> None:
-    """Fail loudly if Stage 3 acceptance invariants do not hold."""
+    """Fail loudly if the universe invariants do not hold."""
     if outputs.pool.duplicated(["signal_date", "stock_code"]).any():
         raise ValueError("Historical universe contains duplicate (signal_date, stock_code) keys.")
     if outputs.period_summary["signal_date"].nunique() != len(outputs.signal_dates):
@@ -187,7 +187,7 @@ def render_report(outputs: UniverseOutputs, config: UniverseConfig) -> str:
 
 
 def run(config: UniverseConfig) -> UniverseOutputs:
-    """Read Stage 2 data, write Stage 3 artifacts, and return their in-memory form."""
+    """Read the cleaned data, write universe artifacts, and return them in memory."""
     directory = config.processed_dir
     listings = pd.read_parquet(directory / "listing_dates.parquet")
     status = pd.read_parquet(directory / "status_changes.parquet")

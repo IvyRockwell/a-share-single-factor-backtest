@@ -88,17 +88,17 @@ def load_robustness_config(config_path: Path) -> RobustnessConfig:
 
 def validate_config(config: RobustnessConfig) -> None:
     if config.selection_quantiles != (0.1, 0.2, 0.3):
-        raise ValueError("Stage 10 requires Top 10%, Top 20%, and Top 30%.")
+        raise ValueError("The grid requires Top 10%, Top 20%, and Top 30%.")
     if config.rebalance_frequencies != ("monthly", "quarterly"):
-        raise ValueError("Stage 10 requires monthly and quarterly rebalancing.")
+        raise ValueError("The grid requires monthly and quarterly rebalancing.")
     if config.quarterly_signal_months != (3, 6, 9, 12):
         raise ValueError("Quarterly signals must use calendar quarter ends.")
     if config.slippage_scenarios_bp != (0, 10, 20):
-        raise ValueError("Stage 10 requires 0/10/20 bp slippage scenarios.")
+        raise ValueError("The grid requires 0/10/20 bp slippage scenarios.")
     if config.weighting != "equal" or config.selection_tie_policy != "preserve_boundary_ties":
-        raise ValueError("Stage 10 must preserve the confirmed Stage 6 weighting and tie rules.")
+        raise ValueError("The grid must preserve the portfolio weighting and tie rules.")
     if config.execution != "next_trading_day_open":
-        raise ValueError("Stage 10 must preserve next-trading-day open execution.")
+        raise ValueError("The grid must preserve next-trading-day open execution.")
 
 
 def filter_signal_frequency(factor_details: pd.DataFrame, frequency: str, quarter_months: tuple[int, ...]) -> pd.DataFrame:
@@ -238,19 +238,19 @@ def _baseline_review(
     performance: PerformanceOutputs,
 ) -> pd.DataFrame:
     comparisons = [
-        ("stage6_targets", portfolio.targets, pd.read_parquet(p / "portfolio_targets.parquet")),
-        ("stage6_actions", portfolio.actions, pd.read_parquet(p / "portfolio_rebalance_actions.parquet")),
-        ("stage6_period_summary", portfolio.period_summary, pd.read_csv(p / "portfolio_period_summary.csv")),
-        ("stage7_daily", backtest.daily, pd.read_parquet(p / "backtest_daily_returns.parquet")),
-        ("stage7_monthly", backtest.monthly, pd.read_csv(p / "backtest_monthly_returns.csv")),
-        ("stage7_holdings", backtest.holdings, pd.read_parquet(p / "backtest_holdings.parquet")),
-        ("stage7_rebalance_records", backtest.rebalance_records, pd.read_parquet(p / "backtest_rebalance_records.parquet")),
-        ("stage8_costs", costs.costs, pd.read_parquet(p / "backtest_stage8_costs.parquet")),
-        ("stage8_daily", costs.daily, pd.read_parquet(p / "backtest_stage8_daily_returns.parquet")),
-        ("stage8_monthly", costs.monthly, pd.read_csv(p / "backtest_stage8_monthly_returns.csv")),
-        ("stage9_metrics", performance.metrics, pd.read_csv(p / "performance_metrics.csv", parse_dates=["start_date", "end_date"])),
-        ("stage9_monthly", performance.monthly, pd.read_csv(p / "performance_monthly_returns.csv")),
-        ("stage9_drawdowns", performance.drawdowns, pd.read_parquet(p / "performance_drawdowns.parquet")),
+        ("portfolio_targets", portfolio.targets, pd.read_parquet(p / "portfolio_targets.parquet")),
+        ("portfolio_actions", portfolio.actions, pd.read_parquet(p / "portfolio_rebalance_actions.parquet")),
+        ("portfolio_periods", portfolio.period_summary, pd.read_csv(p / "portfolio_period_summary.csv")),
+        ("backtest_daily", backtest.daily, pd.read_parquet(p / "backtest_daily_returns.parquet")),
+        ("backtest_monthly", backtest.monthly, pd.read_csv(p / "backtest_monthly_returns.csv")),
+        ("backtest_holdings", backtest.holdings, pd.read_parquet(p / "backtest_holdings.parquet")),
+        ("backtest_trades", backtest.rebalance_records, pd.read_parquet(p / "backtest_rebalance_records.parquet")),
+        ("costs", costs.costs, pd.read_parquet(p / "backtest_costs.parquet")),
+        ("net_daily", costs.daily, pd.read_parquet(p / "backtest_net_daily_returns.parquet")),
+        ("net_monthly", costs.monthly, pd.read_csv(p / "backtest_net_monthly_returns.csv")),
+        ("metrics", performance.metrics, pd.read_csv(p / "performance_metrics.csv", parse_dates=["start_date", "end_date"])),
+        ("monthly", performance.monthly, pd.read_csv(p / "performance_monthly_returns.csv")),
+        ("drawdowns", performance.drawdowns, pd.read_parquet(p / "performance_drawdowns.parquet")),
     ]
     return pd.DataFrame([_compare_frames(label, actual, expected) for label, actual, expected in comparisons])
 
@@ -280,14 +280,14 @@ def validate_outputs(outputs: RobustnessOutputs, config: RobustnessConfig) -> No
     expected = len(config.selection_quantiles) * len(config.rebalance_frequencies) * len(FACTORS) * len(config.slippage_scenarios_bp)
     keys = ["selection_quantile", "rebalance_frequency", "factor", "slippage_bp"]
     if len(outputs.metrics) != expected or outputs.metrics.duplicated(keys).any():
-        raise ValueError("Stage 10 metrics do not contain the complete 54-scenario grid.")
+        raise ValueError("The metrics do not contain the complete 54-scenario grid.")
     for column in ("start_date", "end_date", "observation_count"):
         if outputs.metrics[column].nunique() != 1:
-            raise ValueError(f"Stage 10 scenarios do not share one {column}.")
+            raise ValueError(f"Scenarios do not share one {column}.")
     if outputs.metrics["observation_count"].iloc[0] != 2735:
-        raise ValueError("Stage 10 must preserve the Stage 9 observation count.")
+        raise ValueError("All scenarios must share one observation count.")
     if not outputs.baseline_review["status"].eq("passed").all():
-        raise ValueError("Top 20% monthly did not reproduce the Stage 6-9 baseline.")
+        raise ValueError("Top 20% monthly did not reproduce the recorded baseline.")
     zero_bp = outputs.metrics.loc[outputs.metrics["slippage_bp"].eq(0)]
     if zero_bp["cumulative_transaction_cost"].le(0).any():
         raise ValueError("Zero-bp scenarios must still include commission and stamp duty.")
@@ -336,17 +336,17 @@ def render_report(outputs: RobustnessOutputs, config: RobustnessConfig) -> str:
     lines.extend(["", f"- 无可排名股票的因子/信号期记录数：{insufficient}；这些期间保留为样本不足记录，不填造持仓。", ""])
     lines.extend([
         "", "## 输出文件", "",
-        "- `robustness_stage10_metrics.csv`：54 个策略成本情景的毛、净绩效指标。",
-        "- `robustness_stage10_daily_returns.parquet`：日度毛净收益、换手率和成本。",
-        "- `robustness_stage10_costs.parquet`：实际成交成本明细。",
-        "- `robustness_stage10_portfolio_summary.csv`：逐期选股比例、信号日和执行日。",
+        "- `robustness_metrics.csv`：54 个策略成本情景的毛、净绩效指标。",
+        "- `robustness_daily_returns.parquet`：日度毛净收益、换手率和成本。",
+        "- `robustness_costs.parquet`：实际成交成本明细。",
+        "- `robustness_portfolio_summary.csv`：逐期选股比例、信号日和执行日。",
         "", "## 研究限制", "",
         "- 策略执行日使用开盘至收盘收益，H00300 使用完整日收益，盘中起点不完全一致。",
         "- 涨跌停无法可靠识别；正常交易状态和有效开盘价不构成一定能够成交的保证。",
         "- 缺少真实初始资金和订单金额，最低佣金未纳入。",
         "- 双边 3 bp 佣金和 0/10/20 bp 滑点是研究假设，不代表特定券商费率或真实冲击。",
         "- PE1TTM 的原始数据不能证明其财务分母已按披露时点严格消除前视偏差。",
-        "- 本阶段只做参数敏感性事实总结，不依据全样本结果修改策略或选择最佳参数。", "",
+        "- 本步骤只做参数敏感性事实总结，不依据全样本结果修改策略或选择最佳参数。", "",
     ])
     return "\n".join(lines)
 
@@ -419,10 +419,10 @@ def run(config: RobustnessConfig) -> RobustnessOutputs:
     ])
     benchmark = pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"])
     outputs = build_robustness_outputs(factor_details, daily, benchmark, config)
-    outputs.metrics.to_csv(p / "robustness_stage10_metrics.csv", index=False, encoding="utf-8-sig")
-    outputs.daily.to_parquet(p / "robustness_stage10_daily_returns.parquet", index=False)
-    outputs.costs.to_parquet(p / "robustness_stage10_costs.parquet", index=False)
-    outputs.portfolio_summary.to_csv(p / "robustness_stage10_portfolio_summary.csv", index=False, encoding="utf-8-sig")
+    outputs.metrics.to_csv(p / "robustness_metrics.csv", index=False, encoding="utf-8-sig")
+    outputs.daily.to_parquet(p / "robustness_daily_returns.parquet", index=False)
+    outputs.costs.to_parquet(p / "robustness_costs.parquet", index=False)
+    outputs.portfolio_summary.to_csv(p / "robustness_portfolio_summary.csv", index=False, encoding="utf-8-sig")
     report_dir = p.parent.parent / "reports" / "generated"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "robustness.md").write_text(render_report(outputs, config), encoding="utf-8")

@@ -1,4 +1,4 @@
-"""Tests for the confirmed Stage 5 forward-return and factor-test rules."""
+"""Tests for the forward-return and factor-test rules."""
 
 from pathlib import Path
 

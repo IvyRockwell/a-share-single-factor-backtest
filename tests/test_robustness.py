@@ -1,4 +1,4 @@
-"""Tests for the Stage 10 robustness grid and independent audit rules."""
+"""Tests for the robustness grid rules."""
 
 from pathlib import Path
 

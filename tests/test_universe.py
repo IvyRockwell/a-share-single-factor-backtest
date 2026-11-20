@@ -1,4 +1,4 @@
-"""Tests for the confirmed Stage 3 point-in-time universe rules."""
+"""Tests for the point-in-time universe rules."""
 
 from pathlib import Path
 

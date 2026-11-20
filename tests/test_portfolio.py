@@ -1,4 +1,4 @@
-"""Tests for the confirmed Stage 6 target-portfolio and execution-audit rules."""
+"""Tests for the target-portfolio and execution-audit rules."""
 
 from pathlib import Path
 

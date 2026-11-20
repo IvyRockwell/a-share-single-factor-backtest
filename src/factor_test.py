@@ -58,7 +58,7 @@ def _valid_return_rows(daily: pd.DataFrame) -> pd.Series:
 
 
 def build_forward_returns(factor_details: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
-    """Create one auditable forward-return record for every Stage 4 factor row."""
+    """Create one forward-return record for every factor row."""
     keys = factor_details[["signal_date", "stock_code"]].drop_duplicates().copy()
     periods = build_periods(keys["signal_date"], daily["trade_date"])
     mapped = pd.merge_asof(
@@ -134,7 +134,7 @@ def build_forward_returns_streaming(factor_details: pd.DataFrame, daily_path: Pa
             has_valid_first_holding_day=("is_first_holding_day", "max"),
         ))
     if not partials:
-        raise ValueError("No valid daily returns were available for Stage 5.")
+        raise ValueError("No valid daily returns were available for the factor test.")
     partial = pd.concat(partials, ignore_index=True)
     aggregated = partial.groupby(["signal_date", "stock_code"], as_index=False).agg(
         return_factor=("return_factor", "prod"),

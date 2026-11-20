@@ -29,7 +29,7 @@ class PerformanceOutputs:
 
 
 def load_performance_config(config_path: Path) -> PerformanceConfig:
-    """Load the confirmed Stage 9 annualization assumptions."""
+    """Load the annualization assumptions."""
     with config_path.open(encoding="utf-8") as handle:
         settings = yaml.safe_load(handle)
     research = settings["research"]
@@ -63,93 +63,93 @@ def _same_values(left: pd.Series, right: pd.Series) -> bool:
 
 
 def validate_source_inputs(
-    stage7: pd.DataFrame,
-    stage8: pd.DataFrame,
+    gross_df: pd.DataFrame,
+    net_df: pd.DataFrame,
     costs: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Validate common dates and Stage 7/8 lineage without rerunning either stage."""
-    stage7 = stage7.copy()
-    stage8 = stage8.copy()
+    """Validate common dates and the gross/net lineage without rerunning either step."""
+    gross_df = gross_df.copy()
+    net_df = net_df.copy()
     costs = costs.copy()
     _require_columns(
-        stage7,
+        gross_df,
         {"factor", "trade_date", "gross_return", "nav", "benchmark_return", "benchmark_nav"},
-        "Stage 7 daily results",
+        "backtest daily results",
     )
     _require_columns(
-        stage8,
+        net_df,
         {
             "factor", "trade_date", "slippage_bp", "gross_return", "nav", "benchmark_return",
             "benchmark_nav", "net_return", "net_nav", "turnover", "total_transaction_cost",
         },
-        "Stage 8 daily results",
+        "cost daily results",
     )
     _require_columns(
         costs,
         {"factor", "trade_date", "slippage_bp", "turnover", "total_transaction_cost"},
-        "Stage 8 cost details",
+        "cost details",
     )
-    for frame in (stage7, stage8, costs):
+    for frame in (gross_df, net_df, costs):
         frame["trade_date"] = pd.to_datetime(frame["trade_date"])
 
-    if set(stage7["factor"].unique()) != set(FACTORS):
-        raise ValueError("Stage 7 must contain exactly the PE, Momentum, and ROE strategies.")
-    if set(stage8["factor"].unique()) != set(FACTORS) or set(stage8["slippage_bp"].unique()) != set(SCENARIOS):
-        raise ValueError("Stage 8 must contain all three strategies and 0/10/20 bp scenarios.")
+    if set(gross_df["factor"].unique()) != set(FACTORS):
+        raise ValueError("the gross series must contain exactly the PE, Momentum, and ROE strategies.")
+    if set(net_df["factor"].unique()) != set(FACTORS) or set(net_df["slippage_bp"].unique()) != set(SCENARIOS):
+        raise ValueError("the net series must contain all three strategies and 0/10/20 bp scenarios.")
     if set(costs["factor"].unique()) != set(FACTORS) or set(costs["slippage_bp"].unique()) != set(SCENARIOS):
-        raise ValueError("Stage 8 cost details must contain all strategies and scenarios.")
-    if stage7.duplicated(["factor", "trade_date"]).any():
-        raise ValueError("Stage 7 contains duplicate factor/date rows.")
-    if stage8.duplicated(["factor", "trade_date", "slippage_bp"]).any():
-        raise ValueError("Stage 8 contains duplicate factor/date/scenario rows.")
+        raise ValueError("cost details must contain all strategies and scenarios.")
+    if gross_df.duplicated(["factor", "trade_date"]).any():
+        raise ValueError("the gross series contains duplicate factor/date rows.")
+    if net_df.duplicated(["factor", "trade_date", "slippage_bp"]).any():
+        raise ValueError("the net series contains duplicate factor/date/scenario rows.")
     if costs.duplicated(["factor", "trade_date", "slippage_bp"]).any():
-        raise ValueError("Stage 8 cost details contain duplicate factor/date/scenario rows.")
+        raise ValueError("cost details contain duplicate factor/date/scenario rows.")
 
-    stage7 = stage7.sort_values(["factor", "trade_date"]).reset_index(drop=True)
-    stage8 = stage8.sort_values(["factor", "slippage_bp", "trade_date"]).reset_index(drop=True)
+    gross_df = gross_df.sort_values(["factor", "trade_date"]).reset_index(drop=True)
+    net_df = net_df.sort_values(["factor", "slippage_bp", "trade_date"]).reset_index(drop=True)
     costs = costs.sort_values(["factor", "slippage_bp", "trade_date"]).reset_index(drop=True)
-    common_dates = pd.Index(stage7.loc[stage7["factor"].eq(FACTORS[0]), "trade_date"])
+    common_dates = pd.Index(gross_df.loc[gross_df["factor"].eq(FACTORS[0]), "trade_date"])
     if common_dates.empty:
         raise ValueError("The gross-return series is empty.")
     for factor in FACTORS:
-        dates = pd.Index(stage7.loc[stage7["factor"].eq(factor), "trade_date"])
+        dates = pd.Index(gross_df.loc[gross_df["factor"].eq(factor), "trade_date"])
         if not dates.equals(common_dates):
-            raise ValueError("Stage 7 strategy date ranges are not identical.")
+            raise ValueError("strategy date ranges are not identical.")
     for factor in FACTORS:
         for scenario in SCENARIOS:
             dates = pd.Index(
-                stage8.loc[
-                    stage8["factor"].eq(factor) & stage8["slippage_bp"].eq(scenario),
+                net_df.loc[
+                    net_df["factor"].eq(factor) & net_df["slippage_bp"].eq(scenario),
                     "trade_date",
                 ]
             )
             if not dates.equals(common_dates):
-                raise ValueError("Stage 8 strategy/scenario dates do not match Stage 7.")
+                raise ValueError("scenario dates do not match the gross series.")
 
-    benchmark = stage7.pivot(index="trade_date", columns="factor", values="benchmark_return")
+    benchmark = gross_df.pivot(index="trade_date", columns="factor", values="benchmark_return")
     if benchmark.isna().any().any() or benchmark.nunique(axis=1).gt(1).any():
-        raise ValueError("The Stage 7 benchmark must cover every common date with one consistent return.")
-    merged = stage8.merge(
-        stage7[["factor", "trade_date", "gross_return", "nav", "benchmark_return", "benchmark_nav"]],
+        raise ValueError("The benchmark must cover every common date with one consistent return.")
+    merged = net_df.merge(
+        gross_df[["factor", "trade_date", "gross_return", "nav", "benchmark_return", "benchmark_nav"]],
         on=["factor", "trade_date"],
-        suffixes=("_stage8", "_stage7"),
+        suffixes=("_net", "_gross"),
         validate="many_to_one",
     )
     for column in ("gross_return", "nav", "benchmark_return", "benchmark_nav"):
-        if not _same_values(merged[f"{column}_stage8"], merged[f"{column}_stage7"]):
-            raise ValueError(f"Stage 8 {column} does not reproduce Stage 7.")
+        if not _same_values(merged[f"{column}_net"], merged[f"{column}_gross"]):
+            raise ValueError(f"net {column} does not reproduce the gross series.")
 
     for column in ("gross_return", "benchmark_return", "net_return"):
-        if stage8[column].isna().any() or stage8[column].le(-1).any():
-            raise ValueError(f"Stage 8 {column} contains missing or invalid returns.")
-    if stage7[["gross_return", "benchmark_return"]].isna().any().any():
-        raise ValueError("Stage 7 contains missing strategy or benchmark returns.")
-    if stage8.groupby(["factor", "trade_date"])["turnover"].nunique().gt(1).any():
+        if net_df[column].isna().any() or net_df[column].le(-1).any():
+            raise ValueError(f"net {column} contains missing or invalid returns.")
+    if gross_df[["gross_return", "benchmark_return"]].isna().any().any():
+        raise ValueError("the gross series contains missing strategy or benchmark returns.")
+    if net_df.groupby(["factor", "trade_date"])["turnover"].nunique().gt(1).any():
         raise ValueError("Turnover must be identical across slippage scenarios.")
     if not set(costs["trade_date"]).issubset(set(common_dates)):
-        raise ValueError("Stage 8 cost details contain dates outside the common evaluation range.")
+        raise ValueError("cost details contain dates outside the common evaluation range.")
 
-    daily_totals = stage8.groupby(["factor", "slippage_bp"], as_index=False).agg(
+    daily_totals = net_df.groupby(["factor", "slippage_bp"], as_index=False).agg(
         turnover=("turnover", "sum"),
         transaction_cost=("total_transaction_cost", "sum"),
     )
@@ -160,8 +160,8 @@ def validate_source_inputs(
     totals = daily_totals.merge(cost_totals, on=["factor", "slippage_bp"], suffixes=("_daily", "_detail"), validate="one_to_one")
     for column in ("turnover", "transaction_cost"):
         if not _same_values(totals[f"{column}_daily"], totals[f"{column}_detail"]):
-            raise ValueError(f"Stage 8 daily and detailed {column} totals do not agree.")
-    return stage7, stage8, costs
+            raise ValueError(f"daily and detailed {column} totals do not agree.")
+    return gross_df, net_df, costs
 
 
 def _series_frame(
@@ -220,12 +220,12 @@ def _metric_row(
 
 
 def build_performance_outputs(
-    stage7: pd.DataFrame,
-    stage8: pd.DataFrame,
+    gross_df: pd.DataFrame,
+    net_df: pd.DataFrame,
     costs: pd.DataFrame,
     config: PerformanceConfig,
 ) -> PerformanceOutputs:
-    stage7, stage8, costs = validate_source_inputs(stage7, stage8, costs)
+    gross_df, net_df, costs = validate_source_inputs(gross_df, net_df, costs)
     series_frames: list[pd.DataFrame] = []
     metric_rows: list[dict[str, object]] = []
     cost_totals = costs.groupby(["factor", "slippage_bp"], as_index=False).agg(
@@ -235,14 +235,14 @@ def build_performance_outputs(
     totals_lookup = cost_totals.set_index(["factor", "slippage_bp"])
 
     for factor in FACTORS:
-        gross_source = stage7.loc[stage7["factor"].eq(factor)].sort_values("trade_date")
+        gross_source = gross_df.loc[gross_df["factor"].eq(factor)].sort_values("trade_date")
         turnover = float(totals_lookup.loc[(factor, SCENARIOS[0]), "cumulative_turnover"])
         gross = _series_frame(gross_source, f"{factor}_gross", "gross", factor, np.nan, "gross_return")
         series_frames.append(gross)
         metric_rows.append(_metric_row(gross, config, cumulative_turnover=turnover))
         for scenario in SCENARIOS:
-            net_source = stage8.loc[
-                stage8["factor"].eq(factor) & stage8["slippage_bp"].eq(scenario)
+            net_source = net_df.loc[
+                net_df["factor"].eq(factor) & net_df["slippage_bp"].eq(scenario)
             ].sort_values("trade_date")
             net = _series_frame(net_source, f"{factor}_net_{scenario}bp", "net", factor, float(scenario), "net_return")
             series_frames.append(net)
@@ -255,7 +255,7 @@ def build_performance_outputs(
             ))
 
     benchmark_source = (
-        stage7.loc[stage7["factor"].eq(FACTORS[0]), ["trade_date", "benchmark_return"]]
+        gross_df.loc[gross_df["factor"].eq(FACTORS[0]), ["trade_date", "benchmark_return"]]
         .sort_values("trade_date")
     )
     benchmark = _series_frame(benchmark_source, "h00300_benchmark", "benchmark", "H00300", np.nan, "benchmark_return")
@@ -308,12 +308,12 @@ def render_report(outputs: PerformanceOutputs, config: PerformanceConfig) -> str
         "- 年化波动率 = 日收益样本标准差（`ddof=1`）× `√252`。",
         "- Sharpe Ratio = 日超额收益均值 ÷ 日收益样本标准差 × `√252`；日无风险收益由年化无风险利率复利换算。若日波动率为 0，则不虚构 Sharpe，输出为空。",
         "- 最大回撤 = `净值 ÷ 历史最高净值 - 1` 的最小值；历史最高净值包含回测前初始净值 1。",
-        "- 累计换手率为阶段 8 日度换手率之和；年化换手率 = 累计换手率 × `252 / 2735`。累计交易成本为归一化组合上的 NAV 点数之和，并不等于期末毛净值减期末净净值。",
+        "- 累计换手率为成本步骤的日度换手率之和；年化换手率 = 累计换手率 × `252 / 2735`。累计交易成本为归一化组合上的 NAV 点数之和，并不等于期末毛净值减期末净净值。",
         "",
         "## 毛收益、净收益与基准",
         "",
-        "- 毛收益来自阶段 7，未扣除交易成本；净收益来自阶段 8。0 bp 表示滑点为 0，仍包含买卖双边 3 bp 佣金及卖出印花税。",
-        "- H00300 使用 CSMAR `Idxtrd08` 收益字段，阶段 2 已由百分数除以 100 转为小数日收益；基准不虚构换手率或交易成本。",
+        "- 毛收益来自回测，未扣除交易成本；净收益来自成本步骤。0 bp 表示滑点为 0，仍包含买卖双边 3 bp 佣金及卖出印花税。",
+        "- H00300 使用 CSMAR `Idxtrd08` 收益字段，数据清洗时已由百分数除以 100 转为小数日收益；基准不虚构换手率或交易成本。",
         "",
         "| 序列 | 类型 | 滑点 | 累计收益 | 年化收益 | 年化波动率 | 最大回撤 | Sharpe | 累计换手率 | 年化换手率 | 累计成本 |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -341,7 +341,7 @@ def render_report(outputs: PerformanceOutputs, config: PerformanceConfig) -> str
         "- 缺少真实初始资金、股数和订单金额，最低佣金未纳入。",
         "- 双边 3 bp 佣金和 0/10/20 bp 滑点是研究假设，不代表特定券商费率或真实成交冲击；日频数据也不能估计盘口滑点。",
         "- `PE1TTM` 虽按交易日记录，但原始数据不能复核其财务分母的披露时点、报表版本及历史股本生效时间，因此 PE 结果不能表述为已严格消除前视偏差。",
-        "- 本阶段只评价阶段 7/8 的既有结果，没有重新回测或改变成交、成本、持仓和现金规则。",
+        "- 本步骤只评价回测与成本的既有结果，没有重新回测或改变成交、成本、持仓和现金规则。",
         "",
     ])
     return "\n".join(lines)
@@ -351,8 +351,8 @@ def run(config: PerformanceConfig) -> PerformanceOutputs:
     p = config.processed_dir
     outputs = build_performance_outputs(
         pd.read_parquet(p / "backtest_daily_returns.parquet"),
-        pd.read_parquet(p / "backtest_stage8_daily_returns.parquet"),
-        pd.read_parquet(p / "backtest_stage8_costs.parquet"),
+        pd.read_parquet(p / "backtest_net_daily_returns.parquet"),
+        pd.read_parquet(p / "backtest_costs.parquet"),
         config,
     )
     validate_outputs(outputs)

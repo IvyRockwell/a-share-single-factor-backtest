@@ -92,11 +92,11 @@ def load_inputs(processed_dir: Path) -> FigureInputs:
         quantiles=read_csv("factor_quantile_returns.csv"),
         ic=read_csv("factor_ic_series.csv"),
         gross_daily=pd.read_parquet(processed_dir / "backtest_daily_returns.parquet"),
-        cost_daily=pd.read_parquet(processed_dir / "backtest_stage8_daily_returns.parquet"),
+        cost_daily=pd.read_parquet(processed_dir / "backtest_net_daily_returns.parquet"),
         metrics=read_csv("performance_metrics.csv"),
         monthly=pd.read_csv(processed_dir / "performance_monthly_returns.csv"),
         drawdowns=pd.read_parquet(processed_dir / "performance_drawdowns.parquet"),
-        robustness=read_csv("robustness_stage10_metrics.csv"),
+        robustness=read_csv("robustness_metrics.csv"),
     )
 
 
@@ -111,7 +111,7 @@ def prepare_q_spread(quantiles: pd.DataFrame) -> pd.DataFrame:
     columns = ["q_high_minus_q_low", "cumulative_q_high_minus_q_low"]
     copies = quantiles.groupby(["factor", "signal_date"])[columns].nunique(dropna=False)
     if copies.gt(1).any().any():
-        raise ValueError("Stage 5 Q5-Q1 copies differ across quantile rows.")
+        raise ValueError("Q5-Q1 copies differ across quantile rows.")
     base = (
         quantiles[["factor", "signal_date", *columns]]
         .drop_duplicates(["factor", "signal_date"])
@@ -122,7 +122,7 @@ def prepare_q_spread(quantiles: pd.DataFrame) -> pd.DataFrame:
     if not np.allclose(
         base["cumulative_q_high_minus_q_low"].to_numpy(), direct.to_numpy(), rtol=1e-10, atol=1e-12
     ):
-        raise ValueError("The cumulative Q5-Q1 field does not match the Stage 5 stated cumulative rule.")
+        raise ValueError("The cumulative Q5-Q1 field does not match the stated cumulative rule.")
     return base
 
 
@@ -136,7 +136,7 @@ def validate_inputs(inputs: FigureInputs) -> None:
     })
     _require_columns(inputs.ic, "factor_ic_series", {"factor", "signal_date", "ic_pair_count", "rank_ic"})
     _require_columns(inputs.gross_daily, "backtest_daily_returns", {"factor", "trade_date", "nav", "benchmark_nav"})
-    _require_columns(inputs.cost_daily, "backtest_stage8_daily_returns", {
+    _require_columns(inputs.cost_daily, "backtest_net_daily_returns", {
         "factor", "trade_date", "slippage_bp", "nav", "net_nav", "turnover", "total_transaction_cost"
     })
     _require_columns(inputs.metrics, "performance_metrics", {
@@ -150,7 +150,7 @@ def validate_inputs(inputs: FigureInputs) -> None:
     _require_columns(inputs.drawdowns, "performance_drawdowns", {
         "series_id", "series_type", "factor", "slippage_bp", "trade_date", "drawdown"
     })
-    _require_columns(inputs.robustness, "robustness_stage10_metrics", {
+    _require_columns(inputs.robustness, "robustness_metrics", {
         "selection_quantile", "rebalance_frequency", "factor", "slippage_bp", "start_date", "end_date",
         "net_cumulative_return"
     })
@@ -162,9 +162,9 @@ def validate_inputs(inputs: FigureInputs) -> None:
     if inputs.quantiles.duplicated(["factor", "signal_date", "quantile"]).any():
         raise ValueError("Quantile-return rows contain duplicate keys.")
     if set(inputs.quantiles["quantile"].unique()) != {1, 2, 3, 4, 5}:
-        raise ValueError("The Stage 5 output does not contain exactly Q1-Q5.")
+        raise ValueError("The quantile output does not contain exactly Q1-Q5.")
     if inputs.quantiles["empty_group"].any():
-        raise ValueError("Stage 5 contains empty quantile groups; figures must not silently hide them.")
+        raise ValueError("The quantile output contains empty groups; figures must not silently hide them.")
     prepare_q_spread(inputs.quantiles)
     metric_dates = inputs.metrics[["start_date", "end_date"]].drop_duplicates()
     if len(metric_dates) != 1 or tuple(inputs.metrics["series_type"].unique()) != ("gross", "net", "benchmark"):
@@ -175,7 +175,7 @@ def validate_inputs(inputs: FigureInputs) -> None:
     )
     actual_grid = pd.MultiIndex.from_frame(inputs.robustness[list(expected_grid.names)])
     if len(inputs.robustness) != 54 or set(actual_grid) != set(expected_grid):
-        raise ValueError("The Stage 10 robustness grid is incomplete.")
+        raise ValueError("The robustness grid is incomplete.")
 
 
 def _set_style() -> None:
@@ -210,7 +210,7 @@ def _footer(fig: plt.Figure, text: str) -> None:
 
 
 def _save(fig: plt.Figure, path: Path) -> None:
-    fig.savefig(path, bbox_inches="tight", metadata={"Creator": "Stage 11 research visualization"})
+    fig.savefig(path, bbox_inches="tight", metadata={"Creator": "Research figure"})
     plt.close(fig)
 
 
@@ -286,7 +286,7 @@ def plot_factor(inputs: FigureInputs, factor: str, output: Path) -> None:
     start = min(groups["signal_date"].min(), ic["signal_date"].min()).date()
     end = max(groups["signal_date"].max(), ic["signal_date"].max()).date()
     fig.suptitle(f"{FACTOR_LABELS[factor]} 因子：分组收益、Q5-Q1 与 Rank IC", fontsize=15)
-    _footer(fig, f"来源：factor_quantile_returns.csv、factor_ic_series.csv｜{start}—{end}｜收益为阶段 5 下一持有期结果；非策略 gross/net，成本不适用")
+    _footer(fig, f"来源：factor_quantile_returns.csv、factor_ic_series.csv｜{start}—{end}｜收益为下一持有期结果；非策略 gross/net，成本不适用")
     fig.tight_layout(rect=(0, 0.045, 1, 0.96))
     _save(fig, output)
 
@@ -328,7 +328,7 @@ def plot_gross_vs_net(inputs: FigureInputs, output: Path) -> None:
     axes[-1].set_xlabel("交易日")
     _date_axis(axes[-1])
     fig.suptitle("交易成本情景对三因子策略净值的影响", fontsize=15)
-    _footer(fig, "来源：backtest_daily_returns.parquet、backtest_stage8_daily_returns.parquet｜2014-10-08—2025-12-31｜gross 为实线；net 为虚线｜0 bp 仍含双边 3 bp 佣金和卖出印花税")
+    _footer(fig, "来源：backtest_daily_returns.parquet、backtest_net_daily_returns.parquet｜2014-10-08—2025-12-31｜gross 为实线；net 为虚线｜0 bp 仍含双边 3 bp 佣金和卖出印花税")
     fig.tight_layout(rect=(0, 0.045, 1, 0.96))
     _save(fig, output)
 
@@ -488,7 +488,7 @@ def plot_robustness(inputs: FigureInputs, factor: str, output: Path) -> None:
         ax.set_xlabel("选股比例")
     axes[0].set_ylabel("调仓频率")
     fig.suptitle(f"{FACTOR_LABELS[factor]} 稳健性：选股比例、调仓频率与成本情景", fontsize=15)
-    _footer(fig, "来源：robustness_stage10_metrics.csv｜2014-10-08—2025-12-31｜单元格：net 累计收益（%）｜0 bp 仍含佣金和印花税｜同一因子三面板统一色阶，不标记最佳参数")
+    _footer(fig, "来源：robustness_metrics.csv｜2014-10-08—2025-12-31｜单元格：net 累计收益（%）｜0 bp 仍含佣金和印花税｜同一因子三面板统一色阶，不标记最佳参数")
     fig.subplots_adjust(left=0.08, right=0.90, bottom=0.18, top=0.82, wspace=0.18)
     color_axis = fig.add_axes([0.92, 0.23, 0.013, 0.50])
     colorbar = fig.colorbar(image, cax=color_axis)
@@ -500,11 +500,11 @@ def plot_robustness(inputs: FigureInputs, factor: str, output: Path) -> None:
 def build_figure_index() -> str:
     rows = [
         ("01_sample_quality.png", "股票池规模与三因子可排名样本如何变化？", "factor_period_quality.csv: signal_date, factor, pool_count, rankable_count, unrankable_count, unrankable_by_reason", "不适用", "2014-09-30—2025-12-31", "Momentum 前 6 期无完整 6 个月历史价格；不插值。"),
-        ("02_factor_pe.png", "PE 的五分位、Q5-Q1 与 Rank IC 如何变化？", "factor_quantile_returns.csv: quantile, cumulative_group_return, q_high_minus_q_low, cumulative_q_high_minus_q_low; factor_ic_series.csv: rank_ic", "阶段 5 分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "每期 Q5-Q1 只计算一次，累计值在同期五个分位行中完全一致。"),
-        ("03_factor_momentum.png", "Momentum 的五分位、Q5-Q1 与 Rank IC 如何变化？", "同 02，factor=momentum", "阶段 5 分组未来收益，非策略 gross/net；成本不适用", "2015-03-31—2025-11-28", "前 6 个信号期无完整回看历史，因此不填造结果。"),
-        ("04_factor_roe.png", "ROE 的五分位、Q5-Q1 与 Rank IC 如何变化？", "同 02，factor=roe", "阶段 5 分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "阶段 5 结果不代表开盘可成交策略。"),
+        ("02_factor_pe.png", "PE 的五分位、Q5-Q1 与 Rank IC 如何变化？", "factor_quantile_returns.csv: quantile, cumulative_group_return, q_high_minus_q_low, cumulative_q_high_minus_q_low; factor_ic_series.csv: rank_ic", "分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "每期 Q5-Q1 只计算一次，累计值在同期五个分位行中完全一致。"),
+        ("03_factor_momentum.png", "Momentum 的五分位、Q5-Q1 与 Rank IC 如何变化？", "同 02，factor=momentum", "分组未来收益，非策略 gross/net；成本不适用", "2015-03-31—2025-11-28", "前 6 个信号期无完整回看历史，因此不填造结果。"),
+        ("04_factor_roe.png", "ROE 的五分位、Q5-Q1 与 Rank IC 如何变化？", "同 02，factor=roe", "分组未来收益，非策略 gross/net；成本不适用", "2014-09-30—2025-11-28", "分组结果不代表开盘可成交策略。"),
         ("05_gross_nav_vs_benchmark.png", "三因子毛净值相对 H00300 如何变化？", "backtest_daily_returns.parquet: trade_date, factor, nav, benchmark_nav", "策略 gross；H00300 全收益；未扣策略成本", "2014-10-08—2025-12-31", "策略执行日从开盘开始，基准使用完整日收益，盘中起点不完全一致。"),
-        ("06_gross_vs_net.png", "交易成本情景如何改变各因子净值？", "backtest_daily_returns.parquet: nav; backtest_stage8_daily_returns.parquet: net_nav, slippage_bp", "gross 与 net 0/10/20 bp；0 bp 仍含佣金和印花税", "2014-10-08—2025-12-31", "最低佣金与盘口冲击未纳入；滑点为研究假设。"),
+        ("06_gross_vs_net.png", "交易成本情景如何改变各因子净值？", "backtest_daily_returns.parquet: nav; backtest_net_daily_returns.parquet: net_nav, slippage_bp", "gross 与 net 0/10/20 bp；0 bp 仍含佣金和印花税", "2014-10-08—2025-12-31", "最低佣金与盘口冲击未纳入；滑点为研究假设。"),
         ("07_drawdowns.png", "各毛收益策略与 H00300 的历史回撤如何比较？", "performance_drawdowns.parquet: series_type, factor, trade_date, drawdown", "策略 gross；H00300 全收益；不展示 net", "2014-10-08—2025-12-31", "策略与基准执行日盘中起点不完全一致。"),
         ("08_monthly_returns.png", "三因子毛收益策略每月表现如何？", "performance_monthly_returns.csv: series_type, factor, month, monthly_return", "仅 gross；未扣成本", "2014-10—2025-12", "统一色阶保留极端月份；缺失格显示为破折号。"),
         ("09a_cumulative_return.png", "累计收益在 gross、net 成本情景和基准间如何比较？", "performance_metrics.csv: cumulative_return", "gross、net 0/10/20 bp、H00300", "2014-10-08—2025-12-31", "H00300 不适用策略成本。"),
@@ -513,7 +513,7 @@ def build_figure_index() -> str:
         ("09d_max_drawdown.png", "最大回撤在各序列间如何比较？", "performance_metrics.csv: max_drawdown", "同 09a", "2014-10-08—2025-12-31", "历史峰值包含初始净值 1。"),
         ("09e_sharpe_ratio.png", "Sharpe 在各序列间如何比较？", "performance_metrics.csv: sharpe_ratio", "同 09a", "2014-10-08—2025-12-31", "年化无风险利率为 0%，年化交易日为 252。"),
         ("10_turnover_and_cost.png", "因子换手率与累计交易成本有何差异？", "performance_metrics.csv: annualized_turnover, cumulative_transaction_cost", "换手率与滑点无关；成本为 net 0/10/20 bp", "2014-10-08—2025-12-31", "累计成本为归一化组合的 NAV 点数，不等于期末毛净值减净净值。"),
-        ("11_robustness_pe.png", "PE 净累计收益对选股比例、调仓频率和成本是否敏感？", "robustness_stage10_metrics.csv: selection_quantile, rebalance_frequency, slippage_bp, net_cumulative_return", "net 0/10/20 bp", "2014-10-08—2025-12-31", "边界同分全部保留；不选择最佳参数。"),
+        ("11_robustness_pe.png", "PE 净累计收益对选股比例、调仓频率和成本是否敏感？", "robustness_metrics.csv: selection_quantile, rebalance_frequency, slippage_bp, net_cumulative_return", "net 0/10/20 bp", "2014-10-08—2025-12-31", "边界同分全部保留；不选择最佳参数。"),
         ("12_robustness_momentum.png", "Momentum 净累计收益对参数是否敏感？", "同 11，factor=momentum", "net 0/10/20 bp", "2014-10-08—2025-12-31", "部分参数下收益方向反转；不选择最佳参数。"),
         ("13_robustness_roe.png", "ROE 净累计收益对参数是否敏感？", "同 11，factor=roe", "net 0/10/20 bp", "2014-10-08—2025-12-31", "边界同分全部保留；不选择最佳参数。"),
     ]
@@ -544,7 +544,7 @@ def run(config: VisualizationConfig) -> tuple[Path, ...]:
     config.figure_dir.mkdir(parents=True, exist_ok=True)
     for old in config.figure_dir.glob("*.png"):
         if old.name not in FIGURE_FILES:
-            raise ValueError(f"Unexpected existing PNG would be left outside the Stage 11 index: {old.name}")
+            raise ValueError(f"Unexpected existing PNG is not part of the figure set: {old.name}")
     plot_sample_quality(inputs, config.figure_dir / FIGURE_FILES[0])
     plot_factor(inputs, "pe", config.figure_dir / FIGURE_FILES[1])
     plot_factor(inputs, "momentum", config.figure_dir / FIGURE_FILES[2])
@@ -572,7 +572,7 @@ def run(config: VisualizationConfig) -> tuple[Path, ...]:
     outputs = tuple(config.figure_dir / name for name in FIGURE_FILES)
     missing = [str(path) for path in outputs if not path.exists() or path.stat().st_size == 0]
     if missing:
-        raise ValueError(f"Stage 11 did not create valid image files: {missing}")
+        raise ValueError(f"Figure generation produced no valid image files: {missing}")
     return outputs
 
 
@@ -581,7 +581,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
     args = parser.parse_args(argv)
     outputs = run(load_visualization_config(args.config))
-    print(f"Generated {len(outputs)} Stage 11 figures and the figure index.")
+    print(f"Generated {len(outputs)} figures and the figure index.")
 
 
 if __name__ == "__main__":

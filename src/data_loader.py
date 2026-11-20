@@ -299,7 +299,7 @@ def stream_large_table(name: str, paths: list[Path], cleaner, config: PipelineCo
 
 
 def run_pipeline(config: PipelineConfig) -> dict:
-    """Create all standardized Stage 2 datasets and return their audit summary."""
+    """Create all standardized datasets and return their audit summary."""
     tables = {
         "stock_info": source_files(config.raw_dir, "TRD_Co"),
         "daily_trading": source_files(config.raw_dir, "TRD_Dalyr"),

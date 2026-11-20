@@ -1,4 +1,4 @@
-"""Tests for Stage 2 standardization rules."""
+"""Tests for the standardization rules."""
 
 from pathlib import Path
 

@@ -28,18 +28,18 @@ class CostOutputs:
 
 
 def load_cost_config(config_path: Path) -> CostConfig:
-    """Load the explicitly confirmed Stage 8 assumptions."""
+    """Load the commission, stamp-duty, and slippage assumptions."""
     with config_path.open(encoding="utf-8") as handle:
         settings = yaml.safe_load(handle)
     costs = settings["costs"]
     commission = costs["commission_rate"]
     minimum = costs.get("minimum_commission")
     if commission is None or minimum is not None:
-        raise ValueError("Stage 8 requires a percentage commission rate and no minimum commission.")
+        raise ValueError("costs require a percentage commission rate and no minimum commission.")
     stamp = tuple(sorted((pd.Timestamp(item["start_date"]), float(item["sell_rate"])) for item in costs["stamp_duty_rates"]))
     scenarios = tuple(int(value) for value in costs["slippage_scenarios_bp"])
     if not stamp or not scenarios or any(value < 0 for value in scenarios):
-        raise ValueError("Stage 8 cost assumptions are incomplete.")
+        raise ValueError("cost assumptions are incomplete.")
     return CostConfig(config_path.parent.parent / settings["data"]["processed_dir"], float(commission), stamp, scenarios)
 
 
@@ -51,7 +51,7 @@ def _stamp_duty_rate(day: pd.Timestamp, rates: tuple[tuple[pd.Timestamp, float],
 
 
 def build_cost_outputs(daily: pd.DataFrame, rebalance_records: pd.DataFrame, config: CostConfig) -> CostOutputs:
-    """Apply costs to positive Stage 7 fills without creating any new trades."""
+    """Apply costs to positive backtest fills without creating any new trades."""
     base = daily.copy()
     base["trade_date"] = pd.to_datetime(base["trade_date"])
     base = base.sort_values(["factor", "trade_date"])
@@ -76,7 +76,7 @@ def build_cost_outputs(daily: pd.DataFrame, rebalance_records: pd.DataFrame, con
     for row in totals.itertuples(index=False):
         prior = base.loc[(base["factor"].eq(row.factor)) & (base["trade_date"].eq(row.trade_date)), "prior_gross_nav"]
         if prior.empty:
-            raise ValueError("An actual fill has no matching Stage 7 daily NAV.")
+            raise ValueError("An actual fill has no matching backtest daily NAV.")
         prior_nav = float(prior.iloc[0])
         stamp_rate = _stamp_duty_rate(row.trade_date, config.stamp_duty_rates)
         commission = row.actual_trade_amount * config.commission_rate
@@ -100,7 +100,7 @@ def build_cost_outputs(daily: pd.DataFrame, rebalance_records: pd.DataFrame, con
             })
     costs = pd.DataFrame(rows)
     if costs.empty:
-        raise ValueError("No actual Stage 7 fills are available for cost calculation.")
+        raise ValueError("No actual fills are available for cost calculation.")
 
     scenario_daily: list[pd.DataFrame] = []
     for scenario_bp in config.slippage_scenarios_bp:
@@ -142,16 +142,16 @@ def validate_outputs(outputs: CostOutputs) -> None:
     if outputs.daily["net_nav"].le(0).any() or outputs.daily["net_nav"].gt(outputs.daily["nav"] + 1e-12).any():
         raise ValueError("Net NAV must be positive and no greater than gross NAV.")
     if outputs.daily.duplicated(["factor", "trade_date", "slippage_bp"]).any():
-        raise ValueError("Duplicate Stage 8 daily rows.")
+        raise ValueError("Duplicate daily cost rows.")
 
 
 def render_report(outputs: CostOutputs, config: CostConfig) -> str:
-    lines = ["# 交易成本", "", "## 成本口径", "", "- 成本只对阶段 7 调仓记录中状态为 `executed` 或 `partially_filled_cash_constrained` 且实际开盘成交金额大于 0 的逐笔记录计提；不按目标权重重建成交。", f"- 佣金：买卖双边各 {config.commission_rate * 10_000:.0f} bp；不计最低佣金。", "- 印花税：仅卖出，2014-01-01 至 2023-08-27 为 10 bp，2023-08-28 起为 5 bp。", "- 滑点：买卖双边各 0 bp、10 bp、20 bp；因此 0 bp 情景仍包含佣金与印花税。", "- 换手率 = 当日实际买入金额与实际卖出金额之和 ÷ 前一交易日阶段 7 毛净值；首日分母为 1。", "", "## 参数来源", "", "- 印花税历史规则：[财政部 2008 年单边征收公告](https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/200809/t20080919_76432.htm)；[财政部、税务总局 2023 年减半公告](https://shanxi.chinatax.gov.cn/web/detail/sx-11400-545-1780448)。", "- 佣金 3 bp 与滑点情景均为本研究确认的假设；非特定券商实际费率。", "", "## 情景结果", "", "| 因子 | 滑点情景 | 期末毛净值 | 期末净值 | 累计毛收益 | 累计净收益 | 成本合计 |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    lines = ["# 交易成本", "", "## 成本口径", "", "- 成本只对回测调仓记录中状态为 `executed` 或 `partially_filled_cash_constrained` 且实际开盘成交金额大于 0 的逐笔记录计提；不按目标权重重建成交。", f"- 佣金：买卖双边各 {config.commission_rate * 10_000:.0f} bp；不计最低佣金。", "- 印花税：仅卖出，2014-01-01 至 2023-08-27 为 10 bp，2023-08-28 起为 5 bp。", "- 滑点：买卖双边各 0 bp、10 bp、20 bp；因此 0 bp 情景仍包含佣金与印花税。", "- 换手率 = 当日实际买入金额与实际卖出金额之和 ÷ 前一交易日回测毛净值；首日分母为 1。", "", "## 参数来源", "", "- 印花税历史规则：[财政部 2008 年单边征收公告](https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/200809/t20080919_76432.htm)；[财政部、税务总局 2023 年减半公告](https://shanxi.chinatax.gov.cn/web/detail/sx-11400-545-1780448)。", "- 佣金 3 bp 与滑点情景均为本研究确认的假设；非特定券商实际费率。", "", "## 情景结果", "", "| 因子 | 滑点情景 | 期末毛净值 | 期末净值 | 累计毛收益 | 累计净收益 | 成本合计 |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
     latest = outputs.daily.sort_values("trade_date").groupby(["factor", "slippage_bp"], as_index=False).tail(1)
     cost_totals = outputs.costs.groupby(["factor", "slippage_bp"], as_index=False)["total_transaction_cost"].sum().rename(columns={"total_transaction_cost": "cumulative_transaction_cost"})
     for row in latest.merge(cost_totals, on=["factor", "slippage_bp"]).sort_values(["factor", "slippage_bp"]).itertuples(index=False):
         lines.append(f"| {row.factor} | {row.slippage_bp} bp | {row.nav:.6f} | {row.net_nav:.6f} | {row.nav - 1:.6f} | {row.net_nav - 1:.6f} | {row.cumulative_transaction_cost:.6f} |")
-    lines.extend(["", "## 限制", "", "- 佣金 3 bp 和滑点情景是研究假设，不代表某券商实际费率。缺少真实初始资金、股数和订单金额，无法判断最低 5 元佣金，故不纳入。", "- 涨跌停无法可靠识别；正常状态和有效开盘价不等于必然成交。成本仅对阶段 7 已记录的实际成交计提。", "- 2025-12-31 无后续执行日，未进入实际回测；买入未成交留现金，待卖出恢复可交易后卖出的既有规则不变。", "- 日频数据无法用盘口或逐笔成交估计真实滑点；现金收益为 0，未加入融资或借款。", ""])
+    lines.extend(["", "## 限制", "", "- 佣金 3 bp 和滑点情景是研究假设，不代表某券商实际费率。缺少真实初始资金、股数和订单金额，无法判断最低 5 元佣金，故不纳入。", "- 涨跌停无法可靠识别；正常状态和有效开盘价不等于必然成交。成本仅对回测已记录的实际成交计提。", "- 2025-12-31 无后续执行日，未进入实际回测；买入未成交留现金，待卖出恢复可交易后卖出的既有规则不变。", "- 日频数据无法用盘口或逐笔成交估计真实滑点；现金收益为 0，未加入融资或借款。", ""])
     return "\n".join(lines)
 
 
@@ -159,9 +159,9 @@ def run(config: CostConfig) -> CostOutputs:
     p = config.processed_dir
     outputs = build_cost_outputs(pd.read_parquet(p / "backtest_daily_returns.parquet"), pd.read_parquet(p / "backtest_rebalance_records.parquet"), config)
     validate_outputs(outputs)
-    outputs.costs.to_parquet(p / "backtest_stage8_costs.parquet", index=False)
-    outputs.daily.to_parquet(p / "backtest_stage8_daily_returns.parquet", index=False)
-    outputs.monthly.to_csv(p / "backtest_stage8_monthly_returns.csv", index=False, encoding="utf-8-sig")
+    outputs.costs.to_parquet(p / "backtest_costs.parquet", index=False)
+    outputs.daily.to_parquet(p / "backtest_net_daily_returns.parquet", index=False)
+    outputs.monthly.to_csv(p / "backtest_net_monthly_returns.csv", index=False, encoding="utf-8-sig")
     report_dir = p.parent.parent / "reports" / "generated"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "costs.md").write_text(render_report(outputs, config), encoding="utf-8")

@@ -32,7 +32,7 @@ class PortfolioOutputs:
 
 
 def load_portfolio_config(config_path: Path) -> PortfolioConfig:
-    """Load the confirmed Stage 6 rules."""
+    """Load the portfolio construction rules."""
     with config_path.open(encoding="utf-8") as handle:
         settings = yaml.safe_load(handle)
     root = config_path.parent.parent
@@ -49,17 +49,17 @@ def load_portfolio_config(config_path: Path) -> PortfolioConfig:
 
 
 def validate_config(config: PortfolioConfig) -> None:
-    """Reject configuration values that would contradict the confirmed Stage 6 rules."""
+    """Reject configuration values that would contradict the portfolio rules."""
     if not 0 < config.selection_quantile < 1:
         raise ValueError("selection_quantile must be strictly between zero and one.")
     if config.weighting != "equal":
-        raise ValueError("Stage 6 only supports confirmed equal weighting.")
+        raise ValueError("Only equal weighting is supported.")
     if config.selection_tie_policy != "preserve_boundary_ties":
-        raise ValueError("Stage 6 requires preserving ties at the selection boundary.")
+        raise ValueError("Ties at the selection boundary must be preserved.")
     if config.execution != "next_trading_day_open":
-        raise ValueError("Stage 6 requires next-trading-day open execution.")
+        raise ValueError("Execution must be at the next trading day's open.")
     if config.execution_availability != "normal_trading_status_and_valid_open_price":
-        raise ValueError("Stage 6 requires normal status and a valid open price for execution.")
+        raise ValueError("Execution requires a normal trading status and a valid open price.")
 
 
 def build_execution_dates(signal_dates: pd.Series, trading_dates: pd.Series) -> pd.DataFrame:
@@ -122,7 +122,7 @@ def _split_execution_status(status: pd.Series) -> tuple[pd.Series, pd.Series]:
     reason = status.str.split(":", n=1).str[1]
     reason = reason.fillna(status.map({
         "executable": "normal_trading_status_and_valid_open_price",
-        "rebalance_required": "target_continues_and_is_rebalanced_in_stage7",
+        "rebalance_required": "target_continues_and_is_rebalanced_by_backtest",
         "execution_unavailable_due_to_data_end": "no_later_market_trading_date_in_data",
     }))
     return outcome, reason.astype("string")
@@ -177,7 +177,7 @@ def build_period_summary(targets: pd.DataFrame, actions: pd.DataFrame) -> pd.Dat
 
 
 def build_portfolio_outputs(factor_details: pd.DataFrame, daily: pd.DataFrame, config: PortfolioConfig) -> PortfolioOutputs:
-    """Build all Stage 6 output tables from Stage 4 factors and normalized daily data."""
+    """Build all portfolio tables from the factor data and normalized daily prices."""
     validate_config(config)
     targets = select_targets(factor_details, config)
     dates = build_execution_dates(targets["signal_date"], daily["trade_date"])
@@ -194,7 +194,7 @@ def build_portfolio_outputs(factor_details: pd.DataFrame, daily: pd.DataFrame, c
 
 
 def validate_outputs(outputs: PortfolioOutputs, config: PortfolioConfig) -> None:
-    """Validate Stage 6 acceptance invariants before writing artifacts."""
+    """Validate the portfolio invariants before writing artifacts."""
     targets, actions, summary = outputs.targets, outputs.actions, outputs.period_summary
     if targets.duplicated(["factor", "signal_date", "stock_code"]).any():
         raise ValueError("Target holdings contain duplicate keys.")
@@ -213,31 +213,31 @@ def validate_outputs(outputs: PortfolioOutputs, config: PortfolioConfig) -> None
     if actions.duplicated(["factor", "signal_date", "stock_code", "target_action"]).any():
         raise ValueError("Rebalance actions contain duplicate keys.")
     if actions.loc[actions["target_action"].eq("continue_holding"), "execution_status"].ne("rebalance_required").any():
-        raise ValueError("Continuing target holdings must be passed to Stage 7 for equal-weight rebalancing.")
+        raise ValueError("Continuing target holdings are rebalanced by the backtest.")
     if summary.duplicated(["factor", "signal_date"]).any():
         raise ValueError("Portfolio summary contains duplicate period keys.")
 
 
 def render_report(outputs: PortfolioOutputs, config: PortfolioConfig) -> str:
-    """Render a compact reproducible Stage 6 audit report."""
+    """Render the portfolio report."""
     summary = outputs.period_summary
     lines = [
         "# 单因子目标组合与执行审计", "", "## 固定规则", "",
         f"- 每个因子独立在每个信号日从可排名股票中选择 Top {config.selection_quantile:.0%}；边界同分全部保留，不按股票代码拆分。",
         "- 目标持仓等权，目标权重在每个因子和信号日严格加总为 1。",
         "- 执行日为信号日后的首个市场交易日，执行价格口径为开盘；可执行需有该日交易记录、`trading_status=1` 且开盘价有效。",
-        "- 继续入选股票不视为无委托；阶段 7 在每个执行日按开盘前组合净值重新评估等权调整。",
-        "- 不可买入不替代、不跨日追单；完全退出但不可卖出的持仓由阶段 7 逐日重试。",
+        "- 继续入选股票不视为无委托；回测在每个执行日按开盘前组合净值重新评估等权调整。",
+        "- 不可买入不替代、不跨日追单；完全退出但不可卖出的持仓由回测逐日重试。",
         "- 2025-12-31 的目标候选保留，但因数据末端没有后续执行日而不标记为已执行。", "", "## 输出核对", "",
         f"- 目标持仓：{len(outputs.targets):,} 条；调仓动作：{len(outputs.actions):,} 条；逐期汇总：{len(summary):,} 条。",
         f"- 各期目标权重均为 1；不可买入对应的目标现金权重总和为 {summary['unfilled_buy_cash_weight'].sum():.6f}。", "",
     ]
-    lines.extend(["", "## 限制", "", "- 本阶段只形成目标组合和执行审计，不计算实际市值权重、现金收益、组合收益或延迟卖出后的成交结果。", "- 现有可靠字段不足以识别涨跌停造成的拒单；该限制不被静默视为可成交。", ""])
+    lines.extend(["", "## 限制", "", "- 本步骤只形成目标组合和执行审计，不计算实际市值权重、现金收益、组合收益或延迟卖出后的成交结果。", "- 现有可靠字段不足以识别涨跌停造成的拒单；该限制不被静默视为可成交。", ""])
     return "\n".join(lines)
 
 
 def run(config: PortfolioConfig) -> PortfolioOutputs:
-    """Read Stage 4 data, write Stage 6 artifacts, and return their in-memory form."""
+    """Read the factor data, write portfolio artifacts, and return them in memory."""
     directory = config.processed_dir
     factor_details = pd.read_parquet(directory / "factor_details.parquet")
     daily = pd.read_parquet(directory / "daily_trading.parquet", columns=["stock_code", "trade_date", "trading_status", "open_price", "quality_flags"])

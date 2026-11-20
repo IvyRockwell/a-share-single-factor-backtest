@@ -1,4 +1,4 @@
-"""Tests for Stage 11 research-figure inputs and fixed conventions."""
+"""Tests for the research-figure inputs and fixed conventions."""
 
 
 import pandas as pd

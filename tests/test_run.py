@@ -41,4 +41,4 @@ def test_no_arguments_only_shows_help(capsys, monkeypatch) -> None:
 
 def test_unknown_step_is_rejected() -> None:
     with pytest.raises(SystemExit):
-        run.main(["stage7"])
+        run.main(["bogus"])

@@ -1,4 +1,4 @@
-"""Regression tests for Stage 7 equal-weight execution and return rules."""
+"""Regression tests for equal-weight execution and return rules."""
 
 from pathlib import Path
 

@@ -149,7 +149,7 @@ def add_roe_factor(pool: pd.DataFrame, financials: pd.DataFrame) -> pd.DataFrame
 
 def build_factor_details(pool: pd.DataFrame, valuation: pd.DataFrame, daily: pd.DataFrame,
                          financials: pd.DataFrame, config: FactorConfig) -> pd.DataFrame:
-    """Compute each factor independently for every Stage 3 pool row."""
+    """Compute each factor independently for every pool row."""
     if pool.duplicated(["signal_date", "stock_code"]).any():
         raise ValueError("Historical universe contains duplicate (signal_date, stock_code) keys.")
     result = add_pe_factor(pool[["signal_date", "stock_code"]].copy(), valuation)
@@ -211,13 +211,13 @@ def render_report(outputs: FactorOutputs) -> str:
     details, quality = outputs.details, outputs.quality
     lines = [
         "# PE / Momentum / ROE 因子", "", "## 已执行规则", "",
-        "- 仅在阶段 3 的月末历史股票池计算；每个因子分别保留有效样本及不可排名原因。",
+        "- 仅在月末历史股票池内计算；每个因子分别保留有效样本及不可排名原因。",
         "- PE 使用信号日 `pe_ttm` 的正值，低 PE 得到更高分数。",
         "- Momentum 使用信号日与不晚于六个自然月前目标日的最近有效 `adjusted_close`，高收益得到更高分数。",
         "- ROE 使用信号日前严格已披露的最新合并年度报告（同披露日取最新报告期），高 ROE 得到更高分数。",
         "- 分数为当期有效样本内的反向名次比例，最高看好为 `1.0`；同值采用平均名次。", "",
         "## 重要限制", "",
-        "- 本阶段按确认规则将交易日 `PE1TTM` 视作当日可用；原始数据无法复核财报期、披露时点、报表版本和历史股本生效时间。因此 PE 结果不能表述为已严格消除前视偏差。", "",
+        "- 本项目按既定规则将交易日 `PE1TTM` 视作当日可用；原始数据无法复核财报期、披露时点、报表版本和历史股本生效时间。因此 PE 结果不能表述为已严格消除前视偏差。", "",
         "## 按期质量统计", "", "| 因子 | 信号日数 | 平均股票池 | 平均有效样本 | 平均不可排名 |", "| --- | ---: | ---: | ---: | ---: |",
     ]
     for factor, group in quality.groupby("factor", sort=False):

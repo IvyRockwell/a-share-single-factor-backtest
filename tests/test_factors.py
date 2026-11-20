@@ -1,4 +1,4 @@
-"""Tests for the confirmed Stage 4 factor rules."""
+"""Tests for the factor definitions."""
 
 from pathlib import Path
 

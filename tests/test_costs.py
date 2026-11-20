@@ -1,4 +1,4 @@
-"""Tests for Stage 8 costs derived from actual Stage 7 fills."""
+"""Tests for costs derived from the actual backtest fills."""
 
 from pathlib import Path
 
