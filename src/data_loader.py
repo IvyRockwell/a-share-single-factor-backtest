@@ -51,6 +51,11 @@ def source_files(raw_dir: Path, table: str) -> list[Path]:
     return files
 
 
+def optional_source_files(raw_dir: Path, table: str) -> list[Path]:
+    """Return the shards for a table that is not required to be present."""
+    return sorted(path for path in raw_dir.rglob(f"{table}*.csv") if "[DES]" not in path.name)
+
+
 def read_shards(paths: Iterable[Path]) -> pd.DataFrame:
     """Read UTF-8 CSMAR CSV shards while retaining source text for auditability."""
     return pd.concat((pd.read_csv(path, dtype="string", encoding="utf-8") for path in paths), ignore_index=True)
@@ -192,6 +197,50 @@ def clean_simple_table(raw: pd.DataFrame, code_source: str, date_source: str, co
     return add_flags(frame, {"invalid_stock_code": bad_code.loc[frame.index], "invalid_event_date": bad_date.loc[frame.index]})
 
 
+def clean_industry(raw: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
+    """Standardize the industry classification change log."""
+    frame = raw.rename(columns={
+        "Symbol": "stock_code_source",
+        "ImplementDate": "effective_date_source",
+        "IndustryCode": "industry_code_source",
+    }).copy()
+    frame["stock_code"], bad_code = normalize_code(frame["stock_code_source"])
+    frame["effective_date"], bad_date = normalize_date(frame["effective_date_source"])
+    frame["industry_standard"] = frame["IndustryClassificationID"].astype("string").str.strip()
+    frame["industry_code"] = frame["industry_code_source"].astype("string").str.strip()
+    frame["industry_name"] = frame["IndustryName"].astype("string").str.strip()
+    frame = frame.loc[frame["effective_date"].le(config.end_date)].copy()
+    frame = add_flags(frame, {
+        "invalid_stock_code": bad_code.loc[frame.index],
+        "invalid_effective_date": bad_date.loc[frame.index],
+        "missing_industry_code": frame["industry_code"].isna() | frame["industry_code"].eq(""),
+        "duplicate_key": duplicate_flags(frame, ["stock_code", "industry_standard", "effective_date"]),
+    })
+    columns = ["stock_code", "industry_standard", "effective_date", "industry_code", "industry_name",
+               "quality_flags", "has_quality_issue"]
+    return frame[columns].sort_values(["stock_code", "industry_standard", "effective_date"]).reset_index(drop=True)
+
+
+def clean_capital(raw: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
+    """Standardize the share-count change log."""
+    frame = raw.rename(columns={"Stkcd": "stock_code_source", "Shrchgdt": "effective_date_source"}).copy()
+    frame["stock_code"], bad_code = normalize_code(frame["stock_code_source"])
+    frame["effective_date"], bad_date = normalize_date(frame["effective_date_source"])
+    frame["total_shares"], bad_total = normalize_numeric(frame["Nshrttl"])
+    frame["float_shares"], bad_float = normalize_numeric(frame["Nshra"])
+    frame = frame.loc[frame["effective_date"].le(config.end_date)].copy()
+    frame = add_flags(frame, {
+        "invalid_stock_code": bad_code.loc[frame.index],
+        "invalid_effective_date": bad_date.loc[frame.index],
+        "invalid_total_shares": bad_total.loc[frame.index],
+        "invalid_float_shares": bad_float.loc[frame.index],
+        "nonpositive_total_shares": frame["total_shares"].le(0),
+        "duplicate_key": duplicate_flags(frame, ["stock_code", "effective_date"]),
+    })
+    columns = ["stock_code", "effective_date", "total_shares", "float_shares", "quality_flags", "has_quality_issue"]
+    return frame[columns].sort_values(["stock_code", "effective_date"]).reset_index(drop=True)
+
+
 def clean_calendar(raw: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
     """Standardize calendar rows without treating market codes as stock codes."""
     frame = raw.rename(columns={"Markettype": "market_type_source", "Clddt": "calendar_date_source"}).copy()
@@ -327,6 +376,12 @@ def run_pipeline(config: PipelineConfig) -> dict:
         "trading_calendar": calendar, "listing_dates": listings, "status_changes": status,
         "financial_availability": financials,
     }
+    industry_files = optional_source_files(config.raw_dir, "STK_INDUSTRYCLASS")
+    capital_files = optional_source_files(config.raw_dir, "STK_CAPITAL")
+    if industry_files:
+        outputs["industry"] = clean_industry(read_shards(industry_files), config)
+    if capital_files:
+        outputs["capital"] = clean_capital(read_shards(capital_files), config)
     source_paths = {name: paths for name, paths in tables.items()}
     source_paths["financial_availability"] = tables["income"] + tables["balance"] + tables["disclosures"]
     summary = build_quality_summary(outputs, {"benchmark": benchmark_outside}, source_paths)
