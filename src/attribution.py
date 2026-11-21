@@ -27,6 +27,7 @@ from src.backtest import (
     load_backtest_config,
 )
 from src.costs import CostConfig, build_cost_outputs, load_cost_config
+from src.delisting import load_delisting_events
 from src.factor_test import newey_west_t
 from src.performance import PerformanceConfig, build_performance_outputs, load_performance_config
 from src.portfolio import PortfolioConfig, build_portfolio_outputs, load_portfolio_config
@@ -52,6 +53,7 @@ class AttributionConfig:
     min_cap_coverage: float
     long_short_score_types: tuple[str, ...]
     normal_trading_status: str
+    delisting_return: float = -1.0
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,7 @@ class NeutralLongOnlyOutputs:
     alpha: pd.DataFrame
     daily: pd.DataFrame
     records: pd.DataFrame
+    monthly: pd.DataFrame
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,7 @@ def load_attribution_config(config_path: Path) -> AttributionConfig:
             str(value) for value in attribution.get("long_short_score_types", ["raw", "neutral"])
         ),
         normal_trading_status=str(settings["universe"]["normal_trading_status"]),
+        delisting_return=float((settings.get("delisting") or {}).get("return_assumption", -1.0)),
     )
 
 
@@ -563,12 +567,14 @@ def build_neutral_long_only(
     cost_config: CostConfig,
     performance_config: PerformanceConfig,
     config: AttributionConfig,
+    delistings: pd.DataFrame | None = None,
 ) -> NeutralLongOnlyOutputs:
     """Run the long-only pipeline on neutralized scores.
 
     Factor names stay ``pe/momentum/roe`` inside the backtest so the existing
     validation and cost/performance code can be reused; only the report labels
-    are suffixed with ``_neutral``.
+    are suffixed with ``_neutral``.  The neutral long-only portfolio uses the
+    same delisting write-off assumption as the original long-only run.
     """
     neutral = factor_details.copy()
     for factor in FACTORS:
@@ -576,7 +582,8 @@ def build_neutral_long_only(
         neutral[f"{factor}_is_rankable"] = neutral[f"{factor}_neutral_eligible"].fillna(False)
     portfolio = build_portfolio_outputs(neutral, daily, portfolio_config)
     backtest = build_backtest_outputs(
-        portfolio.targets, portfolio.actions, daily, benchmark, backtest_config, pool, market_cap
+        portfolio.targets, portfolio.actions, daily, benchmark, backtest_config, pool, market_cap,
+        delistings=delistings,
     )
     cost = build_cost_outputs(backtest.daily, backtest.rebalance_records, cost_config)
     performance = build_performance_outputs(backtest.daily, cost.daily, cost.costs, performance_config)
@@ -599,7 +606,7 @@ def build_neutral_long_only(
         strategy, hs300, benchmark_monthly, config,
         factors=tuple(f"{factor}_neutral" for factor in FACTORS),
     )
-    return NeutralLongOnlyOutputs(metrics, neutral_alpha, backtest.daily, backtest.rebalance_records)
+    return NeutralLongOnlyOutputs(metrics, neutral_alpha, backtest.daily, backtest.rebalance_records, monthly)
 
 
 def build_attribution_outputs(
@@ -618,6 +625,7 @@ def build_attribution_outputs(
     cost_config: CostConfig,
     performance_config: PerformanceConfig,
     config: AttributionConfig,
+    delistings: pd.DataFrame | None = None,
 ) -> AttributionOutputs:
     strategy, hs300 = _strategy_monthly(gross, net, config)
     benchmark_monthly, fallback = build_pool_benchmark(
@@ -631,6 +639,7 @@ def build_attribution_outputs(
     neutral = build_neutral_long_only(
         factor_details, daily, benchmark, pool, market_cap, hs300, benchmark_monthly,
         portfolio_config, backtest_config, cost_config, performance_config, config,
+        delistings=delistings,
     )
     return AttributionOutputs(
         benchmark_monthly=benchmark_monthly,
@@ -700,6 +709,7 @@ def render_report(outputs: AttributionOutputs, config: AttributionConfig) -> str
         "- 基准的月份标签取执行日所在月；策略月度按自然月，月末/月初边界有一天的已知错位。基准不计交易成本；策略的 gross 也不计成本，net 0/10/20 bp 来自既有成本步骤。",
         "- 月频最大回撤按月末收盘计算，和日频回测的盘中回撤不是同一口径。",
         "- 回归使用月度简单收益，OLS 含截距；alpha t 为 OLS 标准误，超额均值另给 Newey-West t。",
+        f"- 策略与中性化纯多头对持仓期内“终止上市”的股票按 `{config.delisting_return:.0%}` 统一核销；基准不核销，因此基准的股票池退出路径与策略不完全相同。",
         "- Q5-Q1 为统计多空组合，A 股融券受限，不可直接交易；它用于判断因子是否具有经济显著性，不代表可实现策略。",
         "",
         "## 基准与策略的月度绩效",
@@ -746,9 +756,9 @@ def render_report(outputs: AttributionOutputs, config: AttributionConfig) -> str
         "",
         "## 中性化纯多头回测",
         "",
-        "与原始分数使用同一套目标构建、ADV 容量、开盘成交、成本和绩效规则；因子名加 `_neutral`。",
+        "与原始分数使用同一套目标构建、ADV 容量（固定 1 亿元初始资金，不随 NAV 复利）、开盘成交、成本和绩效规则；因子名加 `_neutral`。",
         "",
-        "| 因子 | 年化 | 年化波动 | Sharpe | 最大回撤 | 相对同池等权 alpha | alpha t |",
+        "| 因子 | gross 年化 | 年化波动 | Sharpe | 最大回撤 | 相对同池等权 gross alpha | alpha t |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
     for factor in FACTORS:
@@ -772,6 +782,8 @@ def render_report(outputs: AttributionOutputs, config: AttributionConfig) -> str
             f"{_format(alpha['alpha_t'].iloc[0], 2) if not alpha.empty else '—'} |"
         )
     lines.extend([
+        "",
+        "表中 alpha 为 gross 口径；net20 与 H00300 口径见 `data/processed/attribution_neutral_alpha.csv`。",
         "",
         "## Q5-Q1 多空组合",
         "",
@@ -809,15 +821,23 @@ def render_report(outputs: AttributionOutputs, config: AttributionConfig) -> str
     pe_style = outputs.style.loc[
         outputs.style["factor"].eq("pe") & outputs.style["return_type"].eq("gross")
     ]
-    neutral_pe = outputs.neutral.alpha.loc[
-        outputs.neutral.alpha["factor"].eq("pe_neutral")
-        & outputs.neutral.alpha["return_type"].eq("gross")
-        & outputs.neutral.alpha["benchmark"].eq("EW_POOL_MONTHLY")
-    ]
-    neutral_text = (
-        f"{_format_percent(neutral_pe['alpha_annualized'].iloc[0])}、t {_format(neutral_pe['alpha_t'].iloc[0], 2)}"
-        if not neutral_pe.empty else "—"
-    )
+    def _neutral_alpha_text(return_type: str, benchmark: str) -> str:
+        row = outputs.neutral.alpha.loc[
+            outputs.neutral.alpha["factor"].eq("pe_neutral")
+            & outputs.neutral.alpha["return_type"].eq(return_type)
+            & outputs.neutral.alpha["benchmark"].eq(benchmark)
+        ]
+        if row.empty:
+            return "—"
+        return (
+            f"{_format_percent(row['alpha_annualized'].iloc[0])}、"
+            f"t {_format(row['alpha_t'].iloc[0], 2)}"
+        )
+
+    neutral_ew_gross = _neutral_alpha_text("gross", "EW_POOL_MONTHLY")
+    neutral_ew_net20 = _neutral_alpha_text("net_20bp", "EW_POOL_MONTHLY")
+    neutral_hs_gross = _neutral_alpha_text("gross", "H00300")
+    neutral_hs_net20 = _neutral_alpha_text("net_20bp", "H00300")
     lines.extend([
         "",
         "## 结论",
@@ -826,8 +846,9 @@ def render_report(outputs: AttributionOutputs, config: AttributionConfig) -> str
         f"- PE gross 相对同池月频等权的年化 alpha 为 {_format_percent(pe_alpha['alpha_annualized'].iloc[0]) if not pe_alpha.empty else '—'}，"
         f"alpha t = {_format(pe_alpha['alpha_t'].iloc[0], 2) if not pe_alpha.empty else '—'}；"
         f"两因子分解的 alpha 为 {_format_percent(pe_style['alpha_annualized'].iloc[0]) if not pe_style.empty else '—'}。"
-        f"原始分数两者 t 都小于 2，不能拒绝“纯多头没有同池超额”；中性化 PE 纯多头相对同池等权的 alpha 见上表（{neutral_text}），"
-        "说明中性化不仅改善 ICIR，也可能把纯多头的同池 alpha 推到显著；但样本内、回撤更大，不能直接外推。",
+        f"原始分数两者 t 都小于 2，不能拒绝“纯多头没有同池超额”；中性化 PE 纯多头相对同池等权的 gross alpha 为 {neutral_ew_gross}，"
+        f"net20 为 {neutral_ew_net20}；相对 H00300 的 gross/net20 alpha 为 {neutral_hs_gross}/{neutral_hs_net20}。"
+        "只有 gross、同池等权口径的 t 超过 2，net20 与 H00300 口径均不显著；因此不能把中性化多头当作稳健的可交易 alpha。",
         "- 若 Q5-全池接近 0、Q1-全池显著为负，则 Q5-Q1 的价差主要来自空头腿；纯多头 Top 20% 拿不到这部分 alpha，IC 显著不等于多头可货币化。",
         "- 多空组合为 gross（可选 10/20bp 换手估算），且 A 股融券受限；不要把多空 Sharpe 当作可交易策略业绩。",
         "",
@@ -857,6 +878,7 @@ def run(config: AttributionConfig, config_path: Path = Path("configs/config.yaml
     members = pd.read_parquet(member_path, columns=[
         "factor", "score_type", "signal_date", "stock_code", "quantile",
     ]) if member_path.exists() else None
+    delistings = load_delisting_events(directory / "status_changes.parquet")
 
     outputs = build_attribution_outputs(
         targets, factor_details, pool, daily, benchmark, market_cap,
@@ -866,6 +888,7 @@ def run(config: AttributionConfig, config_path: Path = Path("configs/config.yaml
         load_cost_config(config_path),
         load_performance_config(config_path),
         config,
+        delistings=delistings,
     )
     validate_outputs(outputs, config)
     outputs.benchmark_monthly.to_csv(directory / "attribution_benchmark_monthly.csv", index=False, encoding="utf-8-sig")
@@ -877,6 +900,7 @@ def run(config: AttributionConfig, config_path: Path = Path("configs/config.yaml
     outputs.summary.to_csv(directory / "attribution_benchmark_metrics.csv", index=False, encoding="utf-8-sig")
     outputs.neutral.metrics.to_csv(directory / "attribution_neutral_metrics.csv", index=False, encoding="utf-8-sig")
     outputs.neutral.alpha.to_csv(directory / "attribution_neutral_alpha.csv", index=False, encoding="utf-8-sig")
+    outputs.neutral.monthly.to_csv(directory / "attribution_neutral_monthly_returns.csv", index=False, encoding="utf-8-sig")
     outputs.neutral.daily.to_parquet(directory / "attribution_neutral_daily.parquet", index=False)
     outputs.neutral.records.to_parquet(directory / "attribution_neutral_rebalance_records.parquet", index=False)
     report_dir = directory.parent.parent / "reports" / "generated"

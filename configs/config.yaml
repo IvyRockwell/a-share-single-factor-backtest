@@ -37,8 +37,9 @@ factors:
   pe_availability_assumption: disclosure_date
 
 factor_test:
-  future_return_start: next_trading_day
-  future_return_end: next_signal_date_close
+  # 未来收益口径：下一交易日开盘买入，到下一信号日收盘。
+  forward_return_start: next_trading_day_open
+  forward_return_end: next_signal_date_close
   min_ic_pairs: 50
   retain_extreme_returns: true
   # 子区间按 A 股风格划分，需覆盖整个样本且互不重叠。
@@ -47,6 +48,12 @@ factor_test:
     - { name: 2017-2019, start: 2017-01-01, end: 2019-12-31 }
     - { name: 2020-2022, start: 2020-01-01, end: 2022-12-31 }
     - { name: 2023-2025, start: 2023-01-01, end: 2025-12-31 }
+
+delisting:
+  # 持仓期内“终止上市”的核销假设。CSMAR 不区分吸收合并与真正退市，
+  # 因此全部事件按同一假设核销；0% 是合并对价的乐观边界，-100% 是保守边界。
+  return_assumption: -1.0
+  sensitivity: [0.0, -0.5, -1.0]
 
 portfolio:
   rebalance_frequency: monthly
@@ -88,7 +95,8 @@ research:
   initial_capital: 100000000
 
 capacity:
-  # 单票目标权重 <= 信号日 N 日 ADV × adv_fraction / 初始资金；超出部分留现金。
+  # 单票目标权重 <= 信号日 N 日 ADV × adv_fraction / 固定初始资金；超出部分留现金。
+  # 注意：这里固定用 initial_capital，不随组合 NAV 复利；净值增长后实际 AUM 下的约束会更紧。
   adv_window: 20
   adv_fraction: 0.05
   min_adv_periods: 10
@@ -103,3 +111,19 @@ robustness:
   selection_quantiles: [0.1, 0.2, 0.3]
   rebalance_frequencies: [monthly, quarterly]
   quarterly_signal_months: [3, 6, 9, 12]
+
+pe_specs:
+  # PE specification robustness：当前正盈利 PE、含负盈利的 E/P、B/M、上市满 12 个月的 PE。
+  listed_months: 12
+  specs: [pe, ep_all, bm, pe_12m]
+
+validation:
+  # 固定开发期/留出期：留出期只用于“因子选择”的样本外评估，不参与任何选择。
+  dev_start: 2014-10-01
+  holdout_start: 2020-01-01
+  walk_forward_start_year: 2018
+  min_train_months: 24
+  # White Reality Check 的 stationary bootstrap 参数。
+  bootstrap_reps: 5000
+  bootstrap_block: 6
+  seed: 20260701

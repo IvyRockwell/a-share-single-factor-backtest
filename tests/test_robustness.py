@@ -26,6 +26,11 @@ def test_config_contains_the_complete_confirmed_parameter_grid() -> None:
     assert config.commission_rate == pytest.approx(0.0003)
 
 
+def test_config_carries_the_delisting_assumption() -> None:
+    config = load_robustness_config(ROOT / "configs" / "config.yaml")
+    assert config.delisting_return == pytest.approx(-1.0)
+
+
 def test_quarterly_uses_existing_calendar_quarter_end_signals() -> None:
     details = pd.DataFrame({
         "signal_date": pd.to_datetime([

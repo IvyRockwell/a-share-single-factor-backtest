@@ -14,6 +14,7 @@ from src.backtest import BacktestConfig, BacktestOutputs, build_backtest_outputs
 from src.backtest import validate_outputs as validate_backtest
 from src.costs import CostConfig, CostOutputs, build_cost_outputs
 from src.costs import validate_outputs as validate_costs
+from src.delisting import load_delisting_events
 from src.performance import PerformanceConfig, PerformanceOutputs, build_performance_outputs
 from src.performance import validate_outputs as validate_performance
 from src.portfolio import (
@@ -49,6 +50,7 @@ class RobustnessConfig:
     adv_fraction: float | None = None
     min_adv_periods: int = 10
     minimum_commission: float | None = None
+    delisting_return: float = -1.0
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ def load_robustness_config(config_path: Path) -> RobustnessConfig:
         adv_fraction=float(adv_fraction) if adv_fraction is not None else None,
         min_adv_periods=int(capacity.get("min_adv_periods", 10)),
         minimum_commission=float(costs["minimum_commission"]) if costs.get("minimum_commission") is not None else None,
+        delisting_return=float((settings.get("delisting") or {}).get("return_assumption", -1.0)),
     )
     validate_config(config)
     return config
@@ -319,6 +322,7 @@ def render_report(outputs: RobustnessOutputs, config: RobustnessConfig) -> str:
         "- 选股边界同分全部保留并等权，因此实际选股比例可能略高于名义比例。无法买入留现金，待卖出恢复可交易后卖出。",
         f"- 统一评价区间：{metrics.start_date.iloc[0]:%Y-%m-%d} 至 {metrics.end_date.iloc[0]:%Y-%m-%d}，共 {int(metrics.observation_count.iloc[0]):,} 个日收益；年化交易日数 {config.annualization_days}，年化无风险利率 {config.risk_free_rate:.2%}。",
         f"- 0 bp 仅表示无滑点，仍包含买卖双边 3 bp 佣金、每笔最低 {config.minimum_commission if config.minimum_commission is not None else 0:.2f} 元和卖出印花税；初始资金 {config.initial_capital:,.0f} 元。",
+        f"- 持仓期内“终止上市”的股票按 `delisting_return = {config.delisting_return:.0%}` 核销；全部事件统一处理，因为现有字段无法区分吸收合并与真正退市（0% 与 -100% 见 `backtest_delisting_impact.csv`）。",
         "", "## 指标公式", "",
         "- 累计收益 = `∏(1 + 日收益) - 1`；年化收益 = `(1 + 累计收益)^(252 / 日收益数) - 1`。",
         "- 年化波动率 = 日收益样本标准差（`ddof=1`）× `√252`；Sharpe = 日超额收益均值 ÷ 日收益样本标准差 × `√252`。",
@@ -359,7 +363,7 @@ def render_report(outputs: RobustnessOutputs, config: RobustnessConfig) -> str:
         "", "## 研究限制", "",
         "- 策略执行日使用开盘至收盘收益，H00300 使用完整日收益，盘中起点不完全一致。",
         "- 涨跌停按开盘价与交易所昨收重建的限价拒单；开盘未封板但盘中被封、或一字板打开后的成交仍未建模。",
-        "- ADV 容量按信号日 20 日 ADV 与初始资金计算，是目标权重级上限，不是逐笔冲击模型。",
+        "- ADV 容量按信号日 20 日 ADV 与固定初始资金 1 亿元计算（不随 NAV 复利），是目标权重级上限，不是逐笔冲击模型；组合净值增长后，实际 AUM 下的约束会更紧。",
         "- 双边 3 bp 佣金和 0/10/20 bp 滑点是研究假设，不代表特定券商费率或真实冲击。",
         "- PE 使用按信号日前已披露财报重建的 TTM 净利润；供应商 `PE1TTM` 实测含前视，本网格沿用重建口径。",
         "- 本步骤只做参数敏感性事实总结，不依据全样本结果修改策略或选择最佳参数。", "",
@@ -374,6 +378,7 @@ def build_robustness_outputs(
     config: RobustnessConfig,
     pool: pd.DataFrame | None = None,
     market_cap: pd.DataFrame | None = None,
+    delistings: pd.DataFrame | None = None,
 ) -> RobustnessOutputs:
     metric_frames: list[pd.DataFrame] = []
     daily_frames: list[pd.DataFrame] = []
@@ -389,7 +394,9 @@ def build_robustness_outputs(
         config.minimum_commission,
         config.initial_capital,
     )
-    backtest_config = BacktestConfig(config.processed_dir, config.normal_trading_status)
+    backtest_config = BacktestConfig(
+        config.processed_dir, config.normal_trading_status, config.delisting_return
+    )
 
     quantile_order = (0.2,) + tuple(value for value in config.selection_quantiles if value != 0.2)
     for quantile in quantile_order:
@@ -398,7 +405,7 @@ def build_robustness_outputs(
             portfolio_config = _portfolio_config(config, quantile)
             portfolio = build_portfolio_outputs(details, daily_trading, portfolio_config)
             validate_portfolio(portfolio, portfolio_config)
-            backtest = build_backtest_outputs(portfolio.targets, portfolio.actions, daily_trading, benchmark, backtest_config, pool, market_cap)
+            backtest = build_backtest_outputs(portfolio.targets, portfolio.actions, daily_trading, benchmark, backtest_config, pool, market_cap, delistings=delistings)
             validate_backtest(backtest)
             cost_output = build_cost_outputs(backtest.daily, backtest.rebalance_records, cost_config)
             validate_costs(cost_output)
@@ -445,7 +452,8 @@ def run(config: RobustnessConfig) -> RobustnessOutputs:
     benchmark = pd.read_parquet(p / "benchmark.parquet", columns=["trade_date", "total_return", "quality_flags"])
     pool = pd.read_parquet(p / "historical_universe.parquet", columns=["signal_date", "stock_code"])
     market_cap = pd.read_parquet(p / "market_cap.parquet", columns=["signal_date", "stock_code", "market_cap", "has_market_cap"])
-    outputs = build_robustness_outputs(factor_details, daily, benchmark, config, pool, market_cap)
+    delistings = load_delisting_events(p / "status_changes.parquet")
+    outputs = build_robustness_outputs(factor_details, daily, benchmark, config, pool, market_cap, delistings)
     outputs.metrics.to_csv(p / "robustness_metrics.csv", index=False, encoding="utf-8-sig")
     outputs.daily.to_parquet(p / "robustness_daily_returns.parquet", index=False)
     outputs.costs.to_parquet(p / "robustness_costs.parquet", index=False)

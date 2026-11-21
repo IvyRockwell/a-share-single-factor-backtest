@@ -120,10 +120,14 @@ def select_targets(factor_details: pd.DataFrame, config: PortfolioConfig) -> pd.
 def apply_adv_cap(targets: pd.DataFrame, daily: pd.DataFrame, config: PortfolioConfig) -> pd.DataFrame:
     """Cap each target weight at a fraction of its signal-date 20-day ADV.
 
-    The cap is applied at the initial-capital level and the excess weight is
-    left as cash, not renormalised.  This is a capacity constraint, not a
-    partial-fill model: the backtest still executes the (capped) target at the
-    next open.
+    The cap is applied at the **fixed initial-capital level**, not at the
+    current NAV/AUM: ``cap_weight = ADV * adv_fraction / initial_capital``.
+    This is deliberately a fixed-AUM capacity constraint, not a compounding-AUM
+    one; once NAV grows, the same dollar cap represents a larger share of the
+    portfolio, so the backtest is more permissive than a dynamic-AUM model.
+    The excess weight is left as cash and is not renormalised.  This is a
+    capacity constraint, not a partial-fill model: the backtest still executes
+    the (capped) target at the next open.
     """
     result = targets.copy()
     result["uncapped_target_weight"] = result["target_weight"]
@@ -331,7 +335,7 @@ def render_report(outputs: PortfolioOutputs, config: PortfolioConfig) -> str:
     lines = [
         "# 单因子目标组合与执行审计", "", "## 固定规则", "",
         f"- 每个因子独立在每个信号日从可排名股票中选择 Top {config.selection_quantile:.0%}；边界同分全部保留，不按股票代码拆分。",
-        "- 目标持仓等权；若启用 ADV 容量，单票权重再按信号日 20 日 ADV × 上限比例 ÷ 初始资金截断，目标权重之和可小于 1，差额为容量预留现金。",
+        "- 目标持仓等权；若启用 ADV 容量，单票权重再按信号日 20 日 ADV × 上限比例 ÷ **固定初始资金 1 亿元**截断，目标权重之和可小于 1，差额为容量预留现金。该上限不随组合 NAV/AUM 增长而复利放大。",
         "- 执行日为信号日后的首个市场交易日，执行价格口径为开盘；可执行需有该日交易记录、`trading_status=1`、开盘价有效且开盘不处于涨停（买入）或跌停（卖出）。",
         "- 继续入选股票不视为无委托；回测在每个执行日按开盘前组合净值重新评估等权调整。",
         "- 不可买入不替代、不跨日追单；完全退出但不可卖出的持仓由回测逐日重试。",
@@ -346,7 +350,7 @@ def render_report(outputs: PortfolioOutputs, config: PortfolioConfig) -> str:
         lines.extend([
             "## ADV 容量",
             "",
-            f"按 `max_aum = min_i(ADV_i × {config.adv_fraction:.0%} ÷ 目标权重_i)`，初始资金 {config.initial_capital:,.0f} 元。",
+            f"按 `max_aum = min_i(ADV_i × {config.adv_fraction:.0%} ÷ 目标权重_i)`，固定初始资金 {config.initial_capital:,.0f} 元；不是随组合净值增长的复利 AUM。",
             "",
             "| 因子 | 期数 | 最小 max AUM | 中位 max AUM | 最大 max AUM | 当前资金绑定行 |",
             "| --- | ---: | ---: | ---: | ---: | ---: |",
@@ -357,7 +361,7 @@ def render_report(outputs: PortfolioOutputs, config: PortfolioConfig) -> str:
                 f"{row.max_aum_max:,.0f} | {int(row.capped_target_rows):,} |"
             )
         lines.append("")
-    lines.extend(["", "## 限制", "", "- 本步骤只形成目标组合和执行审计，不计算实际市值权重、现金收益、组合收益或延迟卖出后的成交结果。", "- 涨跌停按开盘价与交易所昨收重建的限价判断；开盘未封板但盘中被封、或一字板打开后的成交仍未建模。", "- ADV 是目标权重级容量上限，不是逐笔冲击/盘口深度模型。", ""])
+    lines.extend(["", "## 限制", "", "- 本步骤只形成目标组合和执行审计，不计算实际市值权重、现金收益、组合收益或延迟卖出后的成交结果。", "- 涨跌停按开盘价与交易所昨收重建的限价判断；开盘未封板但盘中被封、或一字板打开后的成交仍未建模。", "- ADV 是**固定 1 亿元初始资金**下的目标权重级容量上限（不随 NAV 复利），不是逐笔冲击/盘口深度模型；组合净值增长后，实际 AUM 下的容量约束会更紧。", ""])
     return "\n".join(lines)
 
 

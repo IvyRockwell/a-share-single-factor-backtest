@@ -13,10 +13,12 @@ from src.factor_test import main as factor_test_main
 from src.factors import main as factors_main
 from src.market_cap import main as market_cap_main
 from src.momentum_variants import main as momentum_variants_main
+from src.pe_specs import main as pe_specs_main
 from src.performance import main as performance_main
 from src.portfolio import main as portfolio_main
 from src.robustness import main as robustness_main
 from src.universe import main as universe_main
+from src.validation import main as validation_main
 from src.visualization import main as figures_main
 
 STEPS: dict[str, Callable[[list[str]], None]] = {
@@ -31,10 +33,15 @@ STEPS: dict[str, Callable[[list[str]], None]] = {
     "costs": costs_main,
     "performance": performance_main,
     "attribute": attribution_main,
+    "pespecs": pe_specs_main,
+    "validate": validation_main,
     "robustness": robustness_main,
     "figures": figures_main,
 }
 ORDER = tuple(STEPS)
+#: Accepted step-name aliases: the report step is called ``validate`` in the
+#: pipeline ordering but ``validation`` in the module and artifact names.
+ALIASES = {"validation": "validate"}
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -43,14 +50,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "steps",
         nargs="*",
-        choices=(*ORDER, "all"),
+        choices=(*ORDER, *ALIASES, "all"),
         help="steps to run; each one depends on the earlier ones having run",
     )
     args = parser.parse_args(argv)
     if not args.steps:
         parser.print_help()
         return
-    selected = set(ORDER) if "all" in args.steps else set(args.steps)
+    selected = set(ORDER) if "all" in args.steps else {ALIASES.get(step, step) for step in args.steps}
     for step in ORDER:
         if step in selected:
             STEPS[step]([])

@@ -295,3 +295,71 @@ def test_pit_check_rejects_a_rebuild_that_misses_the_vendor_names() -> None:
     check = build_pe_pit_check(details, valuation)
     with pytest.raises(ValueError, match="can be rebuilt"):
         validate_pit_check(check)
+
+
+def _stock_month_frame(pit: list[float], vendor: list[float]) -> pd.DataFrame:
+    from src.factors import flag_vendor_ahead
+
+    frame = pd.DataFrame({"pe_pit": pit, "pe_ttm": vendor})
+    return flag_vendor_ahead(frame)
+
+
+def test_vendor_ahead_flags_a_missing_rebuild_as_pit_missing() -> None:
+    result = _stock_month_frame([float("nan")], [10.0])
+    assert result.loc[0, "flag_reason"] == "pit_missing"
+    assert bool(result.loc[0, "vendor_ahead_of_disclosure"])
+    assert not bool(result.loc[0, "pit_available"])
+
+
+def test_vendor_ahead_tolerance_is_one_percent() -> None:
+    matched = _stock_month_frame([10.0], [10.0])
+    assert matched.loc[0, "flag_reason"] == "matched"
+    assert not bool(matched.loc[0, "vendor_ahead_of_disclosure"])
+    inside = _stock_month_frame([10.0], [10.05])
+    assert inside.loc[0, "flag_reason"] == "matched"
+    assert not bool(inside.loc[0, "vendor_ahead_of_disclosure"])
+    above = _stock_month_frame([10.0], [12.0])
+    assert above.loc[0, "flag_reason"] == "valuation_mismatch_gt_1pct"
+    assert bool(above.loc[0, "vendor_ahead_of_disclosure"])
+    assert above.loc[0, "relative_difference"] == pytest.approx(2.0 / 12.0)
+    below = _stock_month_frame([10.0], [9.0])
+    assert below.loc[0, "flag_reason"] == "valuation_mismatch_gt_1pct"
+    assert bool(below.loc[0, "vendor_ahead_of_disclosure"])
+
+
+def test_vendor_missing_rows_are_never_flagged_as_look_ahead() -> None:
+    result = _stock_month_frame([10.0, float("nan")], [float("nan"), float("nan")])
+    assert result["flag_reason"].tolist() == ["vendor_missing", "vendor_missing"]
+    assert not result["vendor_ahead_of_disclosure"].any()
+
+
+def test_stock_month_table_matches_the_monthly_aggregate() -> None:
+    from src.factors import build_pe_pit_check, build_pe_pit_stock_month
+
+    dates = pd.to_datetime(["2021-01-29", "2021-01-29", "2021-02-26", "2021-02-26"])
+    details = pd.DataFrame({
+        "signal_date": dates,
+        "stock_code": ["000001", "000002", "000001", "000002"],
+        "pe_pit": [10.0, float("nan"), 12.0, 8.0],
+    })
+    valuation = pd.DataFrame({
+        "stock_code": ["000001", "000002", "000001", "000002"],
+        "trading_date": dates,
+        "pe_ttm": [10.0, 9.0, 12.05, 8.0],
+    })
+    stock_month = build_pe_pit_stock_month(details, valuation)
+    check = build_pe_pit_check(details, valuation).set_index("signal_date")
+
+    assert list(stock_month.columns)[:4] == ["signal_date", "stock_code", "pe_pit", "pe_ttm"]
+    assert stock_month["flag_reason"].tolist() == [
+        "matched", "pit_missing", "matched", "matched",
+    ]
+    assert check.loc[pd.Timestamp("2021-01-29"), "vendor_ahead_count"] == 1
+    assert check.loc[pd.Timestamp("2021-01-29"), "vendor_ahead_share"] == pytest.approx(0.5)
+    assert check.loc[pd.Timestamp("2021-02-26"), "vendor_ahead_count"] == 0
+    assert check.loc[pd.Timestamp("2021-02-26"), "vendor_ahead_share"] == pytest.approx(0.0)
+    for signal_date, group in stock_month.groupby("signal_date"):
+        assert check.loc[signal_date, "vendor_ahead_share"] == pytest.approx(
+            group["vendor_ahead_of_disclosure"].mean()
+        )
+    assert check["share_within_1pct"].tolist() == [1.0, 1.0]

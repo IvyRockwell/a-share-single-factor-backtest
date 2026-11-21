@@ -12,8 +12,23 @@ import pandas as pd
 import pyarrow.parquet as pq
 import yaml
 
+from src.delisting import (
+    apply_forward_delisting,
+    load_delisting_events,
+    validate_delisting_return,
+    validate_forward_delisting,
+)
+
 FACTORS = ("pe", "momentum", "roe")
 MIN_T_STAT_ROWS = 3
+FORWARD_RETURN_START = "next_trading_day_open"
+FORWARD_RETURN_END = "next_signal_date_close"
+FORWARD_COLUMNS = (
+    "signal_date", "stock_code", "holding_end_date", "first_holding_date",
+    "last_observed_date", "valid_return_days", "extreme_return_days", "forward_return",
+    "has_valid_first_holding_day", "forward_eligible", "forward_unavailable_reason",
+    "early_exit_or_data_cutoff", "delisting_event", "delisting_date",
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +37,9 @@ class FactorTestConfig:
     quantile_groups: int
     min_ic_pairs: int
     subperiods: tuple[tuple[str, pd.Timestamp, pd.Timestamp], ...] = ()
+    delisting_return: float = -1.0
+    forward_return_start: str = FORWARD_RETURN_START
+    forward_return_end: str = FORWARD_RETURN_END
 
 
 @dataclass(frozen=True)
@@ -33,6 +51,7 @@ class FactorTestOutputs:
     ic_series: pd.DataFrame
     summary: pd.DataFrame
     subperiods: pd.DataFrame = field(default_factory=pd.DataFrame)
+    source_comparison: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def parse_subperiods(raw: object) -> tuple[tuple[str, pd.Timestamp, pd.Timestamp], ...]:
@@ -54,11 +73,16 @@ def load_factor_test_config(config_path: Path) -> FactorTestConfig:
     with config_path.open(encoding="utf-8") as handle:
         settings = yaml.safe_load(handle)
     root = config_path.parent.parent
+    factor_test = settings["factor_test"]
+    delisting = settings.get("delisting") or {}
     return FactorTestConfig(
         processed_dir=root / settings["data"]["processed_dir"],
         quantile_groups=int(settings["factors"]["quantile_groups"]),
-        min_ic_pairs=int(settings["factor_test"]["min_ic_pairs"]),
-        subperiods=parse_subperiods(settings["factor_test"].get("subperiods")),
+        min_ic_pairs=int(factor_test["min_ic_pairs"]),
+        subperiods=parse_subperiods(factor_test.get("subperiods")),
+        delisting_return=validate_delisting_return(delisting.get("return_assumption", -1.0)),
+        forward_return_start=str(factor_test.get("forward_return_start", FORWARD_RETURN_START)),
+        forward_return_end=str(factor_test.get("forward_return_end", FORWARD_RETURN_END)),
     )
 
 
@@ -77,9 +101,23 @@ def _valid_return_rows(daily: pd.DataFrame) -> pd.Series:
     return daily["total_return"].notna() & ~flags.str.contains("invalid_total_return", regex=False)
 
 
-def build_forward_returns(factor_details: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
-    """Create one forward-return record for every factor row."""
-    keys = factor_details[["signal_date", "stock_code"]].drop_duplicates().copy()
+def _valid_open_close_rows(daily: pd.DataFrame) -> pd.Series:
+    """A usable first holding day needs a tradable open and a tradable close."""
+    flags = daily["quality_flags"].fillna("").astype("string")
+    valid_open = (
+        daily["open_price"].notna()
+        & daily["open_price"].gt(0)
+        & ~flags.str.contains("invalid_open_price", regex=False)
+    )
+    valid_close = (
+        daily["close_price"].notna()
+        & daily["close_price"].gt(0)
+        & ~flags.str.contains("invalid_close_price", regex=False)
+    )
+    return valid_open & valid_close
+
+
+def _build_period_map(keys: pd.DataFrame, daily: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     periods = build_periods(keys["signal_date"], daily["trade_date"])
     mapped = pd.merge_asof(
         daily.sort_values("trade_date"), periods.sort_values("signal_date"),
@@ -89,33 +127,83 @@ def build_forward_returns(factor_details: pd.DataFrame, daily: pd.DataFrame) -> 
         mapped["signal_date"].notna() & mapped["holding_end_date"].notna()
         & mapped["trade_date"].le(mapped["holding_end_date"])
     ].copy()
-    mapped["valid_return"] = _valid_return_rows(mapped)
-    valid = mapped.loc[mapped["valid_return"]].copy()
+    return periods, mapped
+
+
+def _first_day_factor(mapped: pd.DataFrame) -> pd.Series:
+    """Holding-day factors: buy at the open on day one, close-to-close afterwards."""
+    is_first = mapped["trade_date"].eq(mapped["first_holding_date"])
+    valid_first = is_first & _valid_open_close_rows(mapped)
+    valid_later = ~is_first & _valid_return_rows(mapped)
+    factor = pd.Series(np.nan, index=mapped.index, dtype="float64")
+    factor.loc[valid_first] = (
+        mapped.loc[valid_first, "close_price"].astype("float64")
+        / mapped.loc[valid_first, "open_price"].astype("float64")
+    )
+    factor.loc[valid_later] = 1.0 + mapped.loc[valid_later, "total_return"].astype("float64")
+    return factor
+
+
+def _finalise_forward(
+    result: pd.DataFrame,
+    delistings: pd.DataFrame | None,
+    delisting_return: float,
+) -> pd.DataFrame:
+    """Apply the write-off assumption and return one stable column order."""
+    result = apply_forward_delisting(result, delistings, delisting_return)
+    result["valid_return_days"] = result["valid_return_days"].astype("Int64")
+    result["extreme_return_days"] = result["extreme_return_days"].astype("Int64")
+    for column in ("has_valid_first_holding_day", "forward_eligible", "early_exit_or_data_cutoff", "delisting_event"):
+        result[column] = result[column].eq(True).astype(bool)
+    result["forward_return"] = result["forward_return"].astype("float64")
+    result = result[list(FORWARD_COLUMNS)].sort_values(["signal_date", "stock_code"]).reset_index(drop=True)
+    validate_forward_delisting(result)
+    return result
+
+
+def build_forward_returns(factor_details: pd.DataFrame, daily: pd.DataFrame,
+                          delistings: pd.DataFrame | None = None,
+                          delisting_return: float = -1.0) -> pd.DataFrame:
+    """Create one forward-return record for every factor row.
+
+    The holding return starts at the **next trading day's open** and ends at the
+    close of the next signal date.  The first holding day therefore uses
+    ``close_price / open_price`` instead of ``1 + Dretwd`` so that the overnight
+    gap before the buy is not earned; every later day compounds ``1 + Dretwd``.
+    """
+    delisting_return = validate_delisting_return(delisting_return)
+    keys = factor_details[["signal_date", "stock_code"]].drop_duplicates().copy()
+    periods, mapped = _build_period_map(keys, daily)
+    mapped["day_factor"] = _first_day_factor(mapped)
+    valid = mapped.loc[mapped["day_factor"].notna()].copy()
     group_keys = ["signal_date", "stock_code"]
     aggregated = valid.groupby(group_keys, as_index=False).agg(
         last_observed_date=("trade_date", "max"),
         valid_return_days=("trade_date", "size"),
         extreme_return_days=("quality_flags", lambda values: int(values.fillna("").astype("string").str.contains("extreme_total_return", regex=False).sum())),
     )
-    compounded = (1 + valid["total_return"]).groupby([valid["signal_date"], valid["stock_code"]]).prod().sub(1)
-    aggregated = aggregated.merge(compounded.rename("forward_return").reset_index(), on=group_keys, how="left", validate="one_to_one")
+    compounded = valid.groupby(group_keys)["day_factor"].prod().sub(1.0).rename("forward_return").reset_index()
+    aggregated = aggregated.merge(compounded, on=group_keys, how="left", validate="one_to_one")
     entry = valid.loc[valid["trade_date"].eq(valid["first_holding_date"]), group_keys].drop_duplicates()
     entry["has_valid_first_holding_day"] = True
 
     result = keys.merge(periods, on="signal_date", how="left", validate="many_to_one")
     result = result.merge(aggregated, on=group_keys, how="left", validate="one_to_one")
     result = result.merge(entry, on=group_keys, how="left", validate="one_to_one")
-    result["has_valid_first_holding_day"] = result["has_valid_first_holding_day"].fillna(False).astype(bool)
+    result["has_valid_first_holding_day"] = result["has_valid_first_holding_day"].eq(True).astype(bool)
     result["forward_eligible"] = result["holding_end_date"].notna() & result["has_valid_first_holding_day"]
     result["forward_unavailable_reason"] = pd.Series(pd.NA, index=result.index, dtype="string")
     result.loc[result["holding_end_date"].isna(), "forward_unavailable_reason"] = "no_future_holding_period"
     result.loc[result["holding_end_date"].notna() & ~result["has_valid_first_holding_day"], "forward_unavailable_reason"] = "missing_valid_first_holding_day"
     result["early_exit_or_data_cutoff"] = result["forward_eligible"] & result["last_observed_date"].lt(result["holding_end_date"])
-    return result.sort_values(group_keys).reset_index(drop=True)
+    return _finalise_forward(result, delistings, delisting_return)
 
 
-def build_forward_returns_streaming(factor_details: pd.DataFrame, daily_path: Path) -> pd.DataFrame:
+def build_forward_returns_streaming(factor_details: pd.DataFrame, daily_path: Path,
+                                    delistings: pd.DataFrame | None = None,
+                                    delisting_return: float = -1.0) -> pd.DataFrame:
     """Stream the large daily Parquet file while retaining the same forward-return rules."""
+    delisting_return = validate_delisting_return(delisting_return)
     keys = factor_details[["signal_date", "stock_code"]].drop_duplicates().copy()
     parquet_file = pq.ParquetFile(daily_path)
     trading_days: set[pd.Timestamp] = set()
@@ -126,7 +214,10 @@ def build_forward_returns_streaming(factor_details: pd.DataFrame, daily_path: Pa
     ends = periods["holding_end_date"].to_numpy()
     firsts = periods["first_holding_date"].to_numpy()
     partials = []
-    for batch in parquet_file.iter_batches(columns=["stock_code", "trade_date", "total_return", "quality_flags"], batch_size=250_000):
+    for batch in parquet_file.iter_batches(
+        columns=["stock_code", "trade_date", "total_return", "open_price", "close_price", "quality_flags"],
+        batch_size=250_000,
+    ):
         chunk = batch.to_pandas()
         dates = chunk["trade_date"].to_numpy()
         positions = signals.searchsorted(dates, side="left") - 1
@@ -140,14 +231,14 @@ def build_forward_returns_streaming(factor_details: pd.DataFrame, daily_path: Pa
         chunk = chunk.merge(keys, on=["signal_date", "stock_code"], how="inner", validate="many_to_one")
         if chunk.empty:
             continue
-        chunk = chunk.loc[_valid_return_rows(chunk)].copy()
+        chunk["day_factor"] = _first_day_factor(chunk)
+        chunk = chunk.loc[chunk["day_factor"].notna()].copy()
         if chunk.empty:
             continue
-        chunk["return_factor"] = 1 + chunk["total_return"]
         chunk["is_extreme_return"] = chunk["quality_flags"].fillna("").astype("string").str.contains("extreme_total_return", regex=False)
         chunk["is_first_holding_day"] = chunk["trade_date"].eq(chunk["first_holding_date"])
         partials.append(chunk.groupby(["signal_date", "stock_code"], as_index=False).agg(
-            return_factor=("return_factor", "prod"),
+            return_factor=("day_factor", "prod"),
             last_observed_date=("trade_date", "max"),
             valid_return_days=("trade_date", "size"),
             extreme_return_days=("is_extreme_return", "sum"),
@@ -166,13 +257,13 @@ def build_forward_returns_streaming(factor_details: pd.DataFrame, daily_path: Pa
     aggregated["forward_return"] = aggregated.pop("return_factor") - 1
     result = keys.merge(periods, on="signal_date", how="left", validate="many_to_one")
     result = result.merge(aggregated, on=["signal_date", "stock_code"], how="left", validate="one_to_one")
-    result["has_valid_first_holding_day"] = result["has_valid_first_holding_day"].fillna(False).astype(bool)
+    result["has_valid_first_holding_day"] = result["has_valid_first_holding_day"].eq(True).astype(bool)
     result["forward_eligible"] = result["holding_end_date"].notna() & result["has_valid_first_holding_day"]
     result["forward_unavailable_reason"] = pd.Series(pd.NA, index=result.index, dtype="string")
     result.loc[result["holding_end_date"].isna(), "forward_unavailable_reason"] = "no_future_holding_period"
     result.loc[result["holding_end_date"].notna() & ~result["has_valid_first_holding_day"], "forward_unavailable_reason"] = "missing_valid_first_holding_day"
     result["early_exit_or_data_cutoff"] = result["forward_eligible"] & result["last_observed_date"].lt(result["holding_end_date"])
-    return result.sort_values(["signal_date", "stock_code"]).reset_index(drop=True)
+    return _finalise_forward(result, delistings, delisting_return)
 
 
 def assign_quantiles(scores: pd.Series, quantile_groups: int) -> pd.Series:
@@ -307,37 +398,92 @@ def _mean_ir_t(values: pd.Series) -> tuple[float | pd.NA, float | pd.NA, float |
     return mean, ratio, ratio * np.sqrt(len(clean)), newey_west_t(clean)
 
 
+def _rank_ic(frame: pd.DataFrame, column: str, min_pairs: int) -> tuple[float, int]:
+    usable = frame.loc[frame[column].gt(0)].dropna(subset=["forward_return"])
+    count = len(usable)
+    if count < min_pairs:
+        return np.nan, count
+    # Negated so that a positive IC means "lower PE predicts higher return",
+    # matching the direction of the ranked factor score.
+    value = -float(usable[column].corr(usable["forward_return"], method="spearman"))
+    return (np.nan if pd.isna(value) else value), count
+
+
 def build_pe_source_comparison(factor_details: pd.DataFrame, forward_returns: pd.DataFrame,
-                               min_pairs: int) -> pd.DataFrame:
-    """Rank IC of the rebuilt PE and of the vendor field, side by side."""
-    frame = factor_details[["signal_date", "stock_code", "pe_pit", "pe_ttm"]].merge(
+                               min_pairs: int,
+                               stock_month_flags: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Rank IC of the rebuilt PE and of the vendor field, side by side.
+
+    ``stock_month_flags`` is the stock-month table written by
+    :func:`src.factors.build_pe_pit_stock_month`.  When it is available every
+    month is split into the full sample and a *clean* sample that drops the
+    stock-months where the vendor field ran ahead of disclosure, so the
+    look-ahead effect can be measured stock-month by stock-month instead of with
+    a whole-month 50% threshold.
+    """
+    columns = ["signal_date", "stock_code", "pe_pit", "pe_ttm"]
+    frame = factor_details[columns].merge(
         forward_returns[["signal_date", "stock_code", "forward_return", "forward_eligible"]],
         on=["signal_date", "stock_code"], how="inner", validate="one_to_one",
     )
-    frame = frame.loc[frame["forward_eligible"].fillna(False)]
+    frame = frame.loc[frame["forward_eligible"].fillna(False)].copy()
+    if stock_month_flags is not None and not stock_month_flags.empty:
+        flags = stock_month_flags[["signal_date", "stock_code", "vendor_ahead_of_disclosure"]].copy()
+        flags["signal_date"] = pd.to_datetime(flags["signal_date"]).astype("datetime64[ns]")
+        flags["stock_code"] = flags["stock_code"].astype("string")
+        frame["stock_code"] = frame["stock_code"].astype("string")
+        frame = frame.merge(
+            flags, on=["signal_date", "stock_code"], how="left", validate="one_to_one",
+        )
+        frame["vendor_ahead_of_disclosure"] = frame["vendor_ahead_of_disclosure"].fillna(False).astype(bool)
+    else:
+        frame["vendor_ahead_of_disclosure"] = False
     rows = []
     for signal_date, group in frame.groupby("signal_date", sort=True):
-        row = {"signal_date": signal_date}
-        for label, column in (("pit", "pe_pit"), ("vendor", "pe_ttm")):
-            usable = group.loc[group[column].gt(0)].dropna(subset=["forward_return"])
-            row[f"{label}_count"] = len(usable)
-            # Negated so that a positive IC means "lower PE predicts higher return",
-            # matching the direction of the ranked factor score.
-            row[f"{label}_ic"] = (
-                -float(usable[column].corr(usable["forward_return"], method="spearman"))
-                if len(usable) >= min_pairs else np.nan
-            )
+        row: dict[str, object] = {"signal_date": signal_date}
+        row["pit_ic"], row["pit_count"] = _rank_ic(group, "pe_pit", min_pairs)
+        row["vendor_ic"], row["vendor_count"] = _rank_ic(group, "pe_ttm", min_pairs)
+        row["vendor_ahead_count"] = int(group["vendor_ahead_of_disclosure"].sum())
+        row["vendor_ahead_share"] = (
+            float(group["vendor_ahead_of_disclosure"].mean()) if len(group) else np.nan
+        )
+        clean = group.loc[~group["vendor_ahead_of_disclosure"]]
+        row["clean_pit_ic"], row["clean_pair_count"] = _rank_ic(clean, "pe_pit", min_pairs)
+        row["clean_vendor_ic"], _ = _rank_ic(clean, "pe_ttm", min_pairs)
         rows.append(row)
     result = pd.DataFrame(rows)
     result["ic_gap"] = result["vendor_ic"] - result["pit_ic"]
+    result["clean_ic_gap"] = result["clean_vendor_ic"] - result["clean_pit_ic"]
+    if stock_month_flags is None or stock_month_flags.empty:
+        # Without the stock-month table there is no clean subsample to report.
+        for column in ("clean_pit_ic", "clean_vendor_ic", "clean_ic_gap"):
+            result[column] = np.nan
+        result["clean_pair_count"] = 0
+        for column in ("vendor_ahead_count", "vendor_ahead_share"):
+            result[column] = np.nan
     return result
 
 
 def attach_pit_check(result: pd.DataFrame, check: pd.DataFrame) -> pd.DataFrame:
-    """Label each period by whether the vendor field ran ahead of disclosure."""
-    merged = result.merge(check[["signal_date", "share_within_1pct"]], on="signal_date", how="left")
-    merged["vendor_ahead_of_disclosure"] = merged["share_within_1pct"].lt(0.5)
-    return merged
+    """Label each period by whether the vendor field ran ahead of disclosure.
+
+    The stock-month table gives a ``vendor_ahead_share`` for every signal date;
+    when it is present the month is labelled by the majority of its stock-months
+    rather than only by ``share_within_1pct < 0.5``.
+    """
+    if "vendor_ahead_share" in check.columns:
+        share = check[["signal_date", "vendor_ahead_share"]].rename(
+            columns={"vendor_ahead_share": "_check_vendor_ahead_share"}
+        )
+        merged = result.merge(share, on="signal_date", how="left")
+        merged["vendor_ahead_of_disclosure"] = merged["_check_vendor_ahead_share"].gt(0.5)
+        return merged.drop(columns="_check_vendor_ahead_share")
+    share = check[["signal_date", "share_within_1pct"]].rename(
+        columns={"share_within_1pct": "_check_share_within_1pct"}
+    )
+    merged = result.merge(share, on="signal_date", how="left")
+    merged["vendor_ahead_of_disclosure"] = merged["_check_share_within_1pct"].lt(0.5)
+    return merged.drop(columns="_check_share_within_1pct")
 
 
 def build_summary(details: pd.DataFrame, quantile_returns: pd.DataFrame, ic_series: pd.DataFrame) -> pd.DataFrame:
@@ -460,15 +606,40 @@ def render_report(outputs: FactorTestOutputs) -> str:
                 f"{fmt_period(row.ic_win_rate)} | {fmt_period(row.spread_mean)} | {fmt_period(row.spread_t_nw)} |"
             )
     lines.extend(["", "## 口径限制", "", "- 2025-12-31 没有后续持有期数据，未进入分组收益或 IC。",
+                  "- 未来收益从**下一交易日开盘**买入起算，持有到下一信号日收盘：首个持有日按 `close_price / open_price - 1` 计（不赚隔夜跳空，也不用当日 `Dretwd`），其后逐日按 `Dretwd` 复利。首日开盘或收盘无效的记录不进入 IC 与分组。",
                   "- 主 Momentum 为 12-1；2014-09 至 2015-08 没有可用的 12 个月历史价格，未进行分组或 IC。6-1 与 1M 反转的样本见 `reports/generated/momentum-variants.md`。",
-                  "- PE 按信号日前已实际披露财报重建的 TTM 净利润计算，不使用供应商 `PE1TTM`；逐月对照见 `pe_pit_check.csv`。", ""])
+                  "- PE 按信号日前已实际披露财报重建的 TTM 净利润计算，不使用供应商 `PE1TTM`；股票-月份级对照见 `pe_pit_stock_month.csv`。", ""])
+    comparison = outputs.source_comparison
+    if comparison is not None and not comparison.empty:
+        ahead = comparison["vendor_ahead_count"].fillna(0).sum() if "vendor_ahead_count" in comparison else 0
+        share = (
+            comparison["vendor_ahead_count"].sum() / max(comparison["vendor_count"].sum(), 1)
+            if "vendor_ahead_count" in comparison else np.nan
+        )
+        lines.extend([
+            "", "## PE 供应商前视（股票-月份口径）", "",
+            f"- 标记为“供应商前视”的股票-月份记录：{int(ahead):,}；占供应商可定价且有下一期收益的股票-月份 {share:.2%}；全股票池口径见 `pe_pit_stock_month.csv`。",
+            f"- 全样本 PE IC 均值：重建 {comparison['pit_ic'].mean():.4f}，供应商 {comparison['vendor_ic'].mean():.4f}；"
+            f"剔除前视股票-月份后的干净样本：重建 {comparison['clean_pit_ic'].mean():.4f}，"
+            f"供应商 {comparison['clean_vendor_ic'].mean():.4f}。",
+            "- 整月 50% 阈值只作为月度汇总标签，主判断改为股票-月份级标记。",
+        ])
     return "\n".join(lines)
 
 
 def run(config: FactorTestConfig) -> FactorTestOutputs:
     directory = config.processed_dir
     factor_details = pd.read_parquet(directory / "factor_details.parquet")
-    forward = build_forward_returns_streaming(factor_details, directory / "daily_trading.parquet")
+    delistings = load_delisting_events(directory / "status_changes.parquet")
+    forward = build_forward_returns_streaming(
+        factor_details,
+        directory / "daily_trading.parquet",
+        delistings=delistings,
+        delisting_return=config.delisting_return,
+    )
+    ahead_rows = int(forward["delisting_event"].sum())
+    print(f"Forward returns: next-open start; {len(forward):,} rows, "
+          f"{ahead_rows} delisting-window rows adjusted at {config.delisting_return:.0%}.")
     frames = [
         build_factor_test_details(factor_details, forward, config.quantile_groups, score_type, score_suffix, eligibility_suffix)
         for score_type, score_suffix, eligibility_suffix in available_score_types(factor_details)
@@ -476,18 +647,35 @@ def run(config: FactorTestConfig) -> FactorTestOutputs:
     details = pd.concat(frames, ignore_index=True)
     members, quantile_returns = build_quantile_returns(details, config.quantile_groups)
     ic_series = build_ic_series(details, config.min_ic_pairs)
-    comparison = build_pe_source_comparison(factor_details, forward, config.min_ic_pairs)
+    stock_month_path = directory / "pe_pit_stock_month.csv"
+    stock_month_flags = (
+        pd.read_csv(stock_month_path, parse_dates=["signal_date"]) if stock_month_path.exists() else None
+    )
+    comparison = build_pe_source_comparison(
+        factor_details, forward, config.min_ic_pairs, stock_month_flags=stock_month_flags,
+    )
     check_path = directory / "pe_pit_check.csv"
     if check_path.exists():
-        comparison = attach_pit_check(comparison, pd.read_csv(check_path, parse_dates=["signal_date"]))
-        ahead = comparison.loc[comparison["vendor_ahead_of_disclosure"]]
-        matched = comparison.loc[~comparison["vendor_ahead_of_disclosure"]]
-        print(f"PE source: vendor ahead in {len(ahead)} months (vendor IC {ahead['vendor_ic'].mean():.4f} "
-              f"vs rebuilt {ahead['pit_ic'].mean():.4f}); matched in {len(matched)} months "
-              f"({matched['vendor_ic'].mean():.4f} vs {matched['pit_ic'].mean():.4f}).")
+        check = pd.read_csv(check_path, parse_dates=["signal_date"])
+        comparison = attach_pit_check(comparison, check)
+        if "vendor_ahead_share" in check.columns:
+            flagged = int(stock_month_flags["vendor_ahead_of_disclosure"].sum()) if stock_month_flags is not None else int(check["vendor_ahead_count"].sum())
+            total = len(stock_month_flags) if stock_month_flags is not None else int(check["pool_count"].sum())
+            print(f"PE look-ahead: {flagged:,} of {total:,} stock-months flagged "
+                  f"({flagged / max(total, 1):.2%}); clean PE IC "
+                  f"{comparison['clean_pit_ic'].mean():.4f} vs all {comparison['pit_ic'].mean():.4f} "
+                  f"(clean vendor IC {comparison['clean_vendor_ic'].mean():.4f} vs all {comparison['vendor_ic'].mean():.4f}).")
+        else:
+            ahead = comparison.loc[comparison["vendor_ahead_of_disclosure"]]
+            matched = comparison.loc[~comparison["vendor_ahead_of_disclosure"]]
+            print(f"PE source: vendor ahead in {len(ahead)} months (vendor IC {ahead['vendor_ic'].mean():.4f} "
+                  f"vs rebuilt {ahead['pit_ic'].mean():.4f}); matched in {len(matched)} months "
+                  f"({matched['vendor_ic'].mean():.4f} vs {matched['pit_ic'].mean():.4f}).")
     summary = build_summary(details, quantile_returns, ic_series)
     subperiods = build_subperiod_table(quantile_returns, ic_series, config.subperiods)
-    outputs = FactorTestOutputs(forward, details, members, quantile_returns, ic_series, summary, subperiods)
+    outputs = FactorTestOutputs(
+        forward, details, members, quantile_returns, ic_series, summary, subperiods, comparison,
+    )
     validate_outputs(outputs, config.quantile_groups, config.min_ic_pairs)
     forward.to_parquet(directory / "factor_forward_returns.parquet", index=False)
     details.to_parquet(directory / "factor_test_details.parquet", index=False)

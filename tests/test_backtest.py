@@ -227,3 +227,144 @@ def test_universe_benchmark_skips_an_empty_membership() -> None:
     group = pd.DataFrame({"stock_code": ["A"], "total_return": [0.10], "quality_flags": [""]})
     equal, capped = _universe_returns(group, pd.Timestamp("2021-01-29"), {}, {})
     assert pd.isna(equal) and pd.isna(capped)
+
+
+def _delistings(stock_code: str, date: str) -> pd.DataFrame:
+    return pd.DataFrame({
+        "stock_code": [stock_code],
+        "delisting_date": pd.to_datetime([date]),
+    })
+
+
+def test_delisting_writeoff_removes_a_frozen_position() -> None:
+    targets, actions = _inputs([("2021-01-29", "2021-02-01", {"A": 0.5, "B": 0.5})])
+    daily = _market([
+        {"stock_code": "A", "trade_date": "2021-02-01"},
+        {"stock_code": "B", "trade_date": "2021-02-01"},
+        {"stock_code": "B", "trade_date": "2021-02-02", "open_price": 100.0, "close_price": 110.0, "total_return": 0.10},
+        {"stock_code": "B", "trade_date": "2021-02-03", "open_price": 110.0, "close_price": 110.0, "total_return": 0.0},
+    ])
+    output = build_backtest_outputs(
+        targets, actions, daily, _benchmark(["2021-02-01", "2021-02-02", "2021-02-03"]),
+        CONFIG, delistings=_delistings("A", "2021-02-02"),
+    )
+    validate_outputs(output)
+    pe = output.daily.loc[output.daily["factor"].eq("pe")].set_index("trade_date")
+    assert pe.loc[pd.Timestamp("2021-02-02"), "delisting_writeoff_count"] == 1
+    assert pe.loc[pd.Timestamp("2021-02-02"), "nav"] == pytest.approx(0.55)
+    assert pe.loc[pd.Timestamp("2021-02-03"), "delisting_writeoff_count"] == 0
+    assert pe.loc[pd.Timestamp("2021-02-03"), "nav"] == pytest.approx(0.55)
+
+    writeoff = output.rebalance_records.loc[
+        output.rebalance_records["trade_reason"].eq("delisting_writeoff")
+    ]
+    assert len(writeoff) == len(FACTORS)
+    row = writeoff.loc[writeoff["factor"].eq("pe")].iloc[0]
+    assert row["event_type"] == "delist"
+    assert row["status"] == "executed"
+    assert row["reason"] == "delisting_return_-1"
+    assert row["executed_open_value"] == 0
+    assert row["pre_trade_open_value"] == pytest.approx(0.5)
+    assert row["target_weight"] == 0
+    events = output.delisting_events
+    assert len(events) == len(FACTORS)
+    assert events.loc[events["factor"].eq("pe"), "writeoff_value"].iloc[0] == pytest.approx(0.0)
+
+
+def test_delisting_zero_assumption_moves_the_last_value_to_cash() -> None:
+    from dataclasses import replace
+
+    targets, actions = _inputs([("2021-01-29", "2021-02-01", {"A": 0.5, "B": 0.5})])
+    daily = _market([
+        {"stock_code": "A", "trade_date": "2021-02-01"},
+        {"stock_code": "B", "trade_date": "2021-02-01"},
+        {"stock_code": "B", "trade_date": "2021-02-02", "open_price": 100.0, "close_price": 110.0, "total_return": 0.10},
+    ])
+    output = build_backtest_outputs(
+        targets, actions, daily, _benchmark(["2021-02-01", "2021-02-02"]),
+        replace(CONFIG, delisting_return=0.0), delistings=_delistings("A", "2021-02-02"),
+    )
+    validate_outputs(output)
+    pe = output.daily.loc[output.daily["factor"].eq("pe")].set_index("trade_date")
+    assert pe.loc[pd.Timestamp("2021-02-02"), "nav"] == pytest.approx(0.5 + 0.55)
+    assert pe.loc[pd.Timestamp("2021-02-02"), "cash_value"] == pytest.approx(0.5)
+    row = output.rebalance_records.loc[output.rebalance_records["trade_reason"].eq("delisting_writeoff")].iloc[0]
+    assert row["reason"] == "delisting_return_0"
+
+
+def test_pending_sale_is_written_off_instead_of_staying_frozen() -> None:
+    targets, actions = _inputs([
+        ("2021-01-29", "2021-02-01", {"A": 0.5}),
+        ("2021-02-26", "2021-03-01", {"B": 0.5}),
+    ])
+    daily = _market([
+        {"stock_code": "A", "trade_date": "2021-02-01"},
+        {"stock_code": "A", "trade_date": "2021-03-01", "trading_status": "2"},
+        {"stock_code": "B", "trade_date": "2021-03-01"},
+        {"stock_code": "B", "trade_date": "2021-03-02"},
+    ])
+    output = build_backtest_outputs(
+        targets, actions, daily, _benchmark(["2021-02-01", "2021-03-01", "2021-03-02"]),
+        CONFIG, delistings=_delistings("A", "2021-03-02"),
+    )
+    validate_outputs(output)
+    pe = output.daily.loc[output.daily["factor"].eq("pe")].set_index("trade_date")
+    assert pe.loc[pd.Timestamp("2021-03-01"), "pending_sale_count"] == 1
+    assert pe.loc[pd.Timestamp("2021-03-02"), "pending_sale_count"] == 0
+    assert pe.loc[pd.Timestamp("2021-03-02"), "delisting_writeoff_count"] == 1
+    assert pe.loc[pd.Timestamp("2021-03-02"), "nav"] == pytest.approx(0.5)
+    held = output.holdings.loc[
+        output.holdings["factor"].eq("pe") & output.holdings["trade_date"].eq(pd.Timestamp("2021-03-02"))
+    ]
+    assert "A" not in set(held["stock_code"])
+    a_records = output.rebalance_records.loc[
+        output.rebalance_records["stock_code"].eq("A") & output.rebalance_records["factor"].eq("pe")
+    ]
+    assert a_records["trade_reason"].eq("delisting_writeoff").sum() == 1
+    assert not a_records["trade_reason"].eq("pending_exit_recovery").any()
+
+
+def test_validate_allows_zero_nav_after_a_total_writeoff() -> None:
+    from src.backtest import BacktestOutputs, validate_outputs
+
+    day = pd.Timestamp("2021-02-02")
+    daily = pd.DataFrame({
+        "factor": list(FACTORS),
+        "trade_date": [day] * len(FACTORS),
+        "gross_return": [-1.0] * len(FACTORS),
+        "nav": [0.0] * len(FACTORS),
+        "cash_value": [0.0] * len(FACTORS),
+        "equity_value": [0.0] * len(FACTORS),
+        "held_stock_count": [0] * len(FACTORS),
+        "pending_sale_count": [0] * len(FACTORS),
+        "frozen_valuation_count": [0] * len(FACTORS),
+        "delisting_writeoff_count": [1] * len(FACTORS),
+        "benchmark_return": [0.0] * len(FACTORS),
+        "benchmark_nav": [1.0] * len(FACTORS),
+        "ew_benchmark_return": [float("nan")] * len(FACTORS),
+        "cw_benchmark_return": [float("nan")] * len(FACTORS),
+    })
+    monthly = pd.DataFrame({
+        "factor": list(FACTORS), "month": ["2021-02"] * len(FACTORS),
+        "monthly_return": [-1.0] * len(FACTORS), "end_nav": [0.0] * len(FACTORS),
+    })
+    records = pd.DataFrame([
+        {
+            "factor": factor, "trade_date": day, "signal_date": pd.Timestamp("2021-01-29"),
+            "stock_code": "A", "event_type": "delist", "trade_reason": "delisting_writeoff",
+            "status": "executed", "reason": "delisting_return_-1", "target_weight": 0.0,
+            "pre_trade_open_value": 1.0, "target_open_value": 0.0, "requested_open_value": 0.0,
+            "executed_open_value": 0.0, "cash_scale": float("nan"),
+        }
+        for factor in FACTORS
+    ])
+    events = pd.DataFrame([
+        {
+            "factor": factor, "trade_date": day, "signal_date": pd.Timestamp("2021-01-29"),
+            "stock_code": "A", "delisting_date": day, "last_value": 1.0,
+            "writeoff_value": 0.0, "delisting_return": -1.0,
+        }
+        for factor in FACTORS
+    ])
+
+    validate_outputs(BacktestOutputs(daily, monthly, pd.DataFrame(), records, events))

@@ -14,7 +14,10 @@ from src.attribution import (
     build_long_short,
     build_pool_benchmark,
     build_alpha_table,
+    load_attribution_config,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _config() -> AttributionConfig:
@@ -128,7 +131,7 @@ def test_alpha_regression_recovers_a_known_alpha_and_beta() -> None:
 
 
 def test_long_short_summary_and_bridge_use_monthly_means() -> None:
-    rows = []
+    rows: list[dict[str, object]] = []
     spreads = [0.10, -0.05, 0.02]
     q1 = [0.00, 0.01, 0.02]
     q5 = [0.10, -0.04, 0.04]
@@ -147,3 +150,8 @@ def test_long_short_summary_and_bridge_use_monthly_means() -> None:
     assert bridge.iloc[0]["q5_minus_q1"] == pytest.approx(np.mean(spreads))
     assert bridge.iloc[0]["q5_minus_pool"] == pytest.approx(np.mean(q5) - np.mean([np.mean(q1), 0.02, 0.02, 0.02, np.mean(q5)]))
     assert len(monthly) == 3
+
+
+def test_attribution_config_carries_the_shared_delisting_assumption() -> None:
+    config = load_attribution_config(ROOT / "configs" / "config.yaml")
+    assert config.delisting_return == pytest.approx(-1.0)

@@ -525,39 +525,114 @@ def attach_pit_pe(details: pd.DataFrame, panel: pd.DataFrame) -> pd.DataFrame:
     return merged.drop(columns=["ttm_net_profit"])
 
 
-def build_pe_pit_check(details: pd.DataFrame, valuation: pd.DataFrame) -> pd.DataFrame:
-    """Compare the rebuilt PE with the vendor field on every signal date."""
-    vendor = valuation[["stock_code", "trading_date", "pe_ttm"]].rename(columns={"trading_date": "signal_date"})
-    vendor["signal_date"] = pd.to_datetime(vendor["signal_date"]).astype("datetime64[ns]")
-    frame = details[["signal_date", "stock_code", "pe_pit"]].merge(
-        vendor, on=["signal_date", "stock_code"], how="left", validate="one_to_one"
+PIT_AHEAD_TOLERANCE = 0.01
+STOCK_MONTH_COLUMNS = [
+    "signal_date", "stock_code", "pe_pit", "pe_ttm", "pit_available", "vendor_available",
+    "relative_difference", "vendor_ahead_of_disclosure", "flag_reason",
+]
+FLAG_REASONS = ("pit_missing", "valuation_mismatch_gt_1pct", "matched", "vendor_missing")
+
+
+def flag_vendor_ahead(frame: pd.DataFrame) -> pd.DataFrame:
+    """Mark the stock-months where the vendor PE ran ahead of disclosure.
+
+    ``pit_available`` means the rebuilt PE is positive and therefore rankable;
+    ``vendor_available`` is the same test on the supplier field.  A stock-month
+    is flagged when the supplier is usable *and* either the rebuild has no usable
+    PE (so the supplier is pricing a report that was not public yet) or the two
+    values differ by at least :data:`PIT_AHEAD_TOLERANCE`, the same 1% tolerance
+    used by the monthly ``share_within_1pct`` diagnostic.
+    """
+    result = frame.copy()
+    result["pit_available"] = result["pe_pit"].gt(0).fillna(False).astype(bool)
+    result["vendor_available"] = result["pe_ttm"].gt(0).fillna(False).astype(bool)
+    both = result["pit_available"] & result["vendor_available"]
+    pit = result["pe_pit"].astype("float64")
+    vendor = result["pe_ttm"].astype("float64")
+    result["relative_difference"] = np.where(both, (pit - vendor).abs() / vendor, np.nan)
+    pit_missing = result["vendor_available"] & ~result["pit_available"]
+    mismatch = both & pd.Series(result["relative_difference"]).ge(PIT_AHEAD_TOLERANCE)
+    result["vendor_ahead_of_disclosure"] = (pit_missing | mismatch).astype(bool)
+    result["flag_reason"] = pd.Series(
+        np.select(
+            [~result["vendor_available"], pit_missing, mismatch],
+            ["vendor_missing", "pit_missing", "valuation_mismatch_gt_1pct"],
+            default="matched",
+        ),
+        index=result.index,
+        dtype="string",
     )
-    frame["pit_ok"] = frame["pe_pit"].gt(0)
-    frame["vendor_ok"] = frame["pe_ttm"].gt(0)
-    frame["relative_difference"] = np.where(
-        frame["pit_ok"] & frame["vendor_ok"],
-        (frame["pe_pit"] - frame["pe_ttm"]).abs() / frame["pe_ttm"],
-        np.nan,
+    return result
+
+
+def build_pe_pit_stock_month(details: pd.DataFrame, valuation: pd.DataFrame) -> pd.DataFrame:
+    """Compare the rebuilt and supplier PE on every stock-month.
+
+    This is the primary look-ahead diagnostic: the monthly table only aggregates
+    it.  The result has one row per stock and signal date, with the two PE
+    values, their availability flags, and the forward-looking label.
+    """
+    vendor = valuation[["stock_code", "trading_date", "pe_ttm"]].rename(columns={"trading_date": "signal_date"})
+    vendor = vendor.assign(
+        signal_date=pd.to_datetime(vendor["signal_date"]).astype("datetime64[ns]"),
+        stock_code=vendor["stock_code"].astype("string"),
+    )
+    left = details[["signal_date", "stock_code", "pe_pit"]].copy()
+    left = left.assign(
+        signal_date=pd.to_datetime(left["signal_date"]).astype("datetime64[ns]"),
+        stock_code=left["stock_code"].astype("string"),
+    )
+    frame = left.merge(vendor, on=["signal_date", "stock_code"], how="left", validate="one_to_one")
+    frame = flag_vendor_ahead(frame)
+    return frame[STOCK_MONTH_COLUMNS].sort_values(["signal_date", "stock_code"]).reset_index(drop=True)
+
+
+def build_pe_pit_check(details: pd.DataFrame, valuation: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate the stock-month comparison into the monthly diagnostic table."""
+    frame = build_pe_pit_stock_month(details, valuation)
+    frame["within_1pct"] = (
+        frame["pit_available"] & frame["vendor_available"]
+        & frame["relative_difference"].lt(PIT_AHEAD_TOLERANCE)
     )
     rows = []
     for signal_date, group in frame.groupby("signal_date", sort=True):
-        both = group["pit_ok"] & group["vendor_ok"]
+        both = group["pit_available"] & group["vendor_available"]
+        overlap = int(both.sum())
         differences = group.loc[both, "relative_difference"]
         rows.append({
             "signal_date": signal_date,
             "pool_count": len(group),
-            "pit_count": int(group["pit_ok"].sum()),
-            "csmar_count": int(group["vendor_ok"].sum()),
-            "overlap": int(both.sum()),
-            "pit_only": int((group["pit_ok"] & ~group["vendor_ok"]).sum()),
-            "csmar_only": int((~group["pit_ok"] & group["vendor_ok"]).sum()),
-            "share_within_1pct": float(differences.lt(0.01).mean()) if both.any() else np.nan,
-            "median_relative_difference": float(differences.median()) if both.any() else np.nan,
+            "pit_count": int(group["pit_available"].sum()),
+            "csmar_count": int(group["vendor_available"].sum()),
+            "overlap": overlap,
+            "pit_only": int((group["pit_available"] & ~group["vendor_available"]).sum()),
+            "csmar_only": int((~group["pit_available"] & group["vendor_available"]).sum()),
+            "share_within_1pct": float(group.loc[both, "within_1pct"].mean()) if overlap else np.nan,
+            "median_relative_difference": float(differences.median()) if overlap else np.nan,
+            "vendor_ahead_count": int(group["vendor_ahead_of_disclosure"].sum()),
+            "vendor_ahead_share": float(group["vendor_ahead_of_disclosure"].mean()) if len(group) else np.nan,
         })
     return pd.DataFrame(rows)
 
 
-def validate_pit_check(check: pd.DataFrame) -> None:
+def validate_pe_pit_stock_month(frame: pd.DataFrame) -> None:
+    """The stock-month labels must be internally consistent and exhaustive."""
+    if frame.empty:
+        return
+    missing = set(STOCK_MONTH_COLUMNS) - set(frame.columns)
+    if missing:
+        raise ValueError(f"The stock-month PIT table is missing columns: {sorted(missing)}")
+    if frame.duplicated(["signal_date", "stock_code"]).any():
+        raise ValueError("The stock-month PIT table contains duplicate keys.")
+    if not frame["flag_reason"].isin(FLAG_REASONS).all():
+        raise ValueError("A stock-month PIT row has an unknown flag reason.")
+    if frame["vendor_ahead_of_disclosure"].ne(
+        frame["flag_reason"].isin(["pit_missing", "valuation_mismatch_gt_1pct"])
+    ).any():
+        raise ValueError("The stock-month look-ahead flag does not match its reason.")
+
+
+def validate_pe_pit_check(check: pd.DataFrame) -> None:
     """Fail when the rebuilt PE cannot cover the vendor field.
 
     The two series are *expected* to differ: the rebuild only uses reports that were
@@ -567,6 +642,9 @@ def validate_pit_check(check: pd.DataFrame) -> None:
     coverage = check["overlap"].sum() / max(check["csmar_count"].sum(), 1)
     if coverage < PIT_PE_MIN_OVERLAP:
         raise ValueError(f"Only {coverage:.1%} of the vendor PE can be rebuilt.")
+
+
+validate_pit_check = validate_pe_pit_check
 
 
 def run(config: FactorConfig) -> FactorOutputs:
@@ -586,11 +664,17 @@ def run(config: FactorConfig) -> FactorOutputs:
     industry = pd.read_parquet(industry_path, columns=["stock_code", "industry_standard", "effective_date", "industry_code"]) if industry_path.exists() else None
     details = build_factor_details(pool, valuation, daily, financials, config, market_cap, industry)
     if market_cap is not None:
+        stock_month = build_pe_pit_stock_month(details, valuation)
+        validate_pe_pit_stock_month(stock_month)
+        stock_month.to_csv(directory / "pe_pit_stock_month.csv", index=False, encoding="utf-8-sig")
         check = build_pe_pit_check(details, valuation)
         validate_pit_check(check)
         check.to_csv(directory / "pe_pit_check.csv", index=False, encoding="utf-8-sig")
+        flagged = int(stock_month["vendor_ahead_of_disclosure"].sum())
         print(f"PIT PE check: median relative difference {check['median_relative_difference'].median():.2e}, "
-              f"{check['share_within_1pct'].mean():.1%} of rows agree within 1%.")
+              f"{check['share_within_1pct'].mean():.1%} of rows agree within 1%; "
+              f"{flagged:,} of {len(stock_month):,} stock-months flagged as vendor look-ahead "
+              f"({flagged / max(len(stock_month), 1):.2%}).")
     quality = build_quality_summary(details)
     outputs = FactorOutputs(details, quality)
     validate_outputs(outputs, pool)

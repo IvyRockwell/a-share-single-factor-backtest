@@ -42,3 +42,18 @@ def test_no_arguments_only_shows_help(capsys, monkeypatch) -> None:
 def test_unknown_step_is_rejected() -> None:
     with pytest.raises(SystemExit):
         run.main(["bogus"])
+
+
+def test_validation_steps_follow_their_dependencies() -> None:
+    order = list(run.ORDER)
+    assert order.index("attribute") < order.index("pespecs") < order.index("validate") < order.index("robustness")
+    assert {"pespecs", "validate"} <= set(order)
+
+
+def test_validation_alias_runs_the_validate_step(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(run, "STEPS", _recorder(calls))
+
+    run.main(["validation", "pespecs"])
+
+    assert calls == ["pespecs", "validate"]
